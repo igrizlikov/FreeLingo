@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Native macOS/Apple Silicon build. Produces a signed (ad-hoc) .app and DMG.
+# Native macOS/Apple Silicon build. Produces an ad-hoc signed .app and DMG.
+# An ad-hoc signature is NOT notarization / Developer ID certification.
 # Can run on GitHub Actions: no developer tools are required on the user's Mac.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
@@ -22,6 +23,7 @@ BIN="$APP/Contents/MacOS"
 rm -rf "$APP"
 mkdir -p "$BIN" "$APP/Contents/Resources"
 cp assets/Info.plist "$APP/Contents/Info.plist"
+cp assets/FreeLingo.icns "$APP/Contents/Resources/FreeLingo.icns"
 cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
@@ -84,6 +86,13 @@ for component in "$BIN"/*.dylib "$BIN/llama-server"; do
 done
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --deep --verbose=1 "$APP"
+# Fail the build if any arm64 model-server library points into the CI build
+# directory instead of being bundled with FreeLingo.
+for binary in "$BIN/llama-server" "$BIN"/*.dylib; do
+  [[ -f "$binary" ]] || continue
+  otool -L "$binary"
+done
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
 "$BIN/llama-server" --version
 file "$BIN/FreeLingo" "$BIN/llama-server"
 
@@ -92,8 +101,11 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/FreeLingo.app"
 ln -s /Applications "$STAGE/Applications"
-rm -f "$ROOT/dist/FreeLingo-0.5-AppleSilicon.dmg"
-hdiutil create -volname "FreeLingo 0.5" -srcfolder "$STAGE" \
-  -format UDZO -imagekey zlib-level=9 -ov "$ROOT/dist/FreeLingo-0.5-AppleSilicon.dmg"
-hdiutil verify "$ROOT/dist/FreeLingo-0.5-AppleSilicon.dmg"
-echo "DMG built: $ROOT/dist/FreeLingo-0.5-AppleSilicon.dmg"
+rm -f "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
+hdiutil create -volname "FreeLingo 0.5.4" -srcfolder "$STAGE" \
+  -format UDZO -imagekey zlib-level=9 -ov "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
+hdiutil verify "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
+echo "DMG built: $ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
+
+# Record a reproducible checksum for the GitHub Actions artifact.
+shasum -a 256 "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg" > "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg.sha256"

@@ -1,6 +1,6 @@
 [package]
 name = "freelingo-core"
-version = "0.5.0"
+version = "0.5.4"
 edition = "2021"
 license = "MIT"
 description = "Local translation core for FreeLingo macOS"

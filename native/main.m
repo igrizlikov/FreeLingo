@@ -577,6 +577,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [confirm addButtonWithTitle:@"Отмена"];
     if ([confirm runModal] != NSAlertFirstButtonReturn) return;
 
+    // Capture the original AX element before releasing our selection state.
+    // The asynchronous paste must re-verify BOTH the original focused app and
+    // its selected text after the warning dialog and window activation.
+    AXUIElementRef retainedElement = _originElement ? (AXUIElementRef)CFRetain(_originElement) : NULL;
+    pid_t originalPID = _originPID;
+    NSString *originalSelection = [_originSelection copy];
     NSPasteboard *pb = NSPasteboard.generalPasteboard;
     NSMutableArray<NSPasteboardItem *> *backup = [NSMutableArray new];
     for (NSPasteboardItem *original in pb.pasteboardItems) {
@@ -590,16 +596,30 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [pb clearContents];
     [pb setString:_currentQuickResult forType:NSPasteboardTypeString];
     NSInteger ourChangeCount = pb.changeCount;
-    NSRunningApplication *originalApp = [NSRunningApplication runningApplicationWithProcessIdentifier:_originPID];
+    NSRunningApplication *originalApp = [NSRunningApplication runningApplicationWithProcessIdentifier:originalPID];
     [_quickPanel orderOut:nil];
     [originalApp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Only send paste if the clipboard is still ours. The user may have copied something new.
-        if (pb.changeCount != ourChangeCount) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (pb.changeCount != ourChangeCount) {
+            if (retainedElement) CFRelease(retainedElement);
+            return; // The user has copied a different text: preserve their clipboard.
+        }
+        CFTypeRef selectedNow = NULL;
+        AXError axError = retainedElement ? AXUIElementCopyAttributeValue(retainedElement, kAXSelectedTextAttribute, &selectedNow) : kAXErrorFailure;
+        BOOL sameSelection = (axError == kAXErrorSuccess && selectedNow && CFGetTypeID(selectedNow) == CFStringGetTypeID() &&
+                              [(__bridge NSString *)selectedNow isEqualToString:originalSelection]);
+        if (selectedNow) CFRelease(selectedNow);
+        BOOL correctApp = (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == originalPID);
+        if (!correctApp || !sameSelection) {
+            [pb clearContents];
+            if (backup.count) [pb writeObjects:backup];
+            if (retainedElement) CFRelease(retainedElement);
+            [self presentMessage:@"Безопасная замена отменена: исходное окно или выделение изменилось. Скопируй перевод вручную."];
+            return;
+        }
         CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-        if (!src) return;
-        CGEventRef down = CGEventCreateKeyboardEvent(src, (CGKeyCode)9, true);
-        CGEventRef up = CGEventCreateKeyboardEvent(src, (CGKeyCode)9, false);
+        CGEventRef down = src ? CGEventCreateKeyboardEvent(src, (CGKeyCode)9, true) : NULL;
+        CGEventRef up = src ? CGEventCreateKeyboardEvent(src, (CGKeyCode)9, false) : NULL;
         if (down && up) {
             CGEventSetFlags(down, kCGEventFlagMaskCommand);
             CGEventSetFlags(up, kCGEventFlagMaskCommand);
@@ -608,7 +628,11 @@ static void FLRustCallback(char *raw, int success, void *context) {
         }
         if (down) CFRelease(down);
         if (up) CFRelease(up);
-        CFRelease(src);
+        if (src) CFRelease(src);
+        if (retainedElement) CFRelease(retainedElement);
+        if (!src || !down || !up) {
+            [self presentMessage:@"Не удалось отправить ⌘V. Скопируй перевод вручную."];
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (pb.changeCount == ourChangeCount) {
                 [pb clearContents];

@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <string.h>
 // Imported into main.m after Cocoa / CommonCrypto. FreeLingo model manifest.
 // SHA256 fingerprints are official on the linked Hugging Face file pages.
 static NSArray<NSDictionary<NSString *, NSString *> *> *FLModels(void) {
@@ -32,8 +34,19 @@ static NSURL *FLModelURL(NSInteger index) {
 }
 static BOOL FLModelInstalled(NSInteger index) {
     NSURL *url = FLModelURL(index);
-    NSDictionary *attributes = url ? [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil] : nil;
-    return [attributes[NSFileSize] unsignedLongLongValue] > 400 * 1024 * 1024;
+    if (!url) return NO;
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+    // Size-only checks accepted truncated 1.7B / 4B GGUF files as installed.
+    const unsigned long long minimumBytes[3] = {400000000ULL, 1080000000ULL, 2100000000ULL};
+    if ([attributes[NSFileSize] unsignedLongLongValue] < minimumBytes[(NSUInteger)index]) return NO;
+    // All selected models are GGUF. Reject an HTML error page or non-GGUF download.
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:url.path];
+    if (!handle) return NO;
+    NSData *magic = nil;
+    @try { magic = [handle readDataOfLength:4]; }
+    @catch (NSException *exception) { (void)exception; return NO; }
+    @finally { [handle closeFile]; }
+    return magic.length == 4 && memcmp(magic.bytes, "GGUF", 4) == 0;
 }
 static NSInteger FLActiveModelIndex(void) {
     NSString *id = [NSUserDefaults.standardUserDefaults stringForKey:@"modelID"];
@@ -45,13 +58,20 @@ static NSInteger FLActiveModelIndex(void) {
 static NSString *FLHashFile(NSURL *url) {
     NSInputStream *input = [NSInputStream inputStreamWithURL:url];
     [input open];
-    if (input.streamStatus == NSStreamStatusError) return nil;
+    if (input.streamStatus == NSStreamStatusError || input.streamStatus == NSStreamStatusNotOpen) {
+        [input close];
+        return nil;
+    }
     CC_SHA256_CTX ctx;
     CC_SHA256_Init(&ctx);
-    uint8_t buffer[1024 * 1024];
+    // Use the heap, not the small GCD worker-thread stack. A 1-MB stack buffer
+    // crashed older versions of FreeLingo on completion of the download.
+    uint8_t *buffer = malloc(64 * 1024);
+    if (!buffer) { [input close]; return nil; }
     NSInteger amount;
-    while ((amount = [input read:buffer maxLength:sizeof(buffer)]) > 0)
+    while ((amount = [input read:buffer maxLength:64 * 1024]) > 0)
         CC_SHA256_Update(&ctx, buffer, (CC_LONG)amount);
+    free(buffer);
     [input close];
     if (amount < 0) return nil;
     uint8_t digest[CC_SHA256_DIGEST_LENGTH];

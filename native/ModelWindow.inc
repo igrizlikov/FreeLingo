@@ -140,8 +140,11 @@
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task
         didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)total
         totalBytesExpectedToWrite:(int64_t)expected {
-    (void)session; (void)task; (void)bytesWritten;
+    (void)session; (void)bytesWritten;
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Old progress callbacks can arrive after verification starts or the
+        // download has already been cancelled/replaced.
+        if (task != self->_modelTask || self->_verifyingModel) return;
         if (expected > 0) {
             self->_modelProgress.doubleValue = MIN(100, (double)total * 100.0 / expected);
             self->_modelStatus.stringValue = [NSString stringWithFormat:@"Загружено %.1f из %.1f ГБ · %.0f%%",
@@ -154,7 +157,9 @@
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task
         didFinishDownloadingToURL:(NSURL *)location {
-    (void)session; (void)task;
+    // NSURLSession owns `location` only until this callback returns, so move it
+    // synchronously before hashing it on our own background queue.
+    if (session != _modelSession || task != _modelTask) return;
     NSInteger index = _downloadingModelIndex;
     NSURL *destination = FLModelURL(index);
     // Session temporary URL is only valid during this delegate callback.
@@ -170,7 +175,8 @@
     });
     if (!moved) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self modelDownloadFinished:NO message:moveError.localizedDescription ?: @"Ошибка сохранения файла" index:index];
+            if (session == self->_modelSession)
+                [self modelDownloadFinished:NO message:moveError.localizedDescription ?: @"Ошибка сохранения файла" index:index];
         });
         return;
     }
@@ -180,27 +186,31 @@
         NSError *error = nil;
         BOOL saved = NO;
         if (valid) {
-            [manager removeItemAtURL:destination error:nil];
+            // Never remove a previously installed model before the new one is
+            // safely in place. The UI normally disallows replacing installed files.
             saved = [manager moveItemAtURL:partial toURL:destination error:&error];
         }
         if (!saved) [manager removeItemAtURL:partial error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *message = saved ? @"Загрузка завершена. Модель проверена и выбрана." :
-                (valid ? (error.localizedDescription ?: @"Ошибка установки модели") : @"Контрольная сумма SHA-256 не совпадает. Модель удалена.");
+            if (session != self->_modelSession || !self->_verifyingModel) return;
+            NSString *message = saved ? @"Загрузка завершена. SHA-256 совпадает, модель готова." :
+                (valid ? (error.localizedDescription ?: @"Ошибка установки модели") :
+                 (sha ? @"Не совпадает SHA-256. Файл удалён; повтори загрузку." : @"Не удалось прочитать скачанный файл для SHA-256."));
             [self modelDownloadFinished:saved message:message index:index];
         });
     });
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    (void)session; (void)task;
     if (!error) return; // Successful downloads are finalized after SHA-256 verification.
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (session != self->_modelSession || task != self->_modelTask || self->_verifyingModel) return;
         [self modelDownloadFinished:NO message:(error.code == NSURLErrorCancelled ? @"Загрузка отменена" : error.localizedDescription) index:self->_downloadingModelIndex];
     });
 }
 
 - (void)modelDownloadFinished:(BOOL)success message:(NSString *)message index:(NSInteger)index {
+    if (!_modelSession) return;
     _modelTask = nil;
     [_modelSession finishTasksAndInvalidate];
     _modelSession = nil;
@@ -216,7 +226,7 @@
 - (void)removeSelectedModel:(id)sender {
     (void)sender;
     NSInteger index = _modelPicker.indexOfSelectedItem;
-    if (index < 0 || !FLModelInstalled(index) || _modelTask) return;
+    if (index < 0 || !FLModelInstalled(index) || _modelTask || _verifyingModel) return;
     NSAlert *confirmation = [NSAlert new];
     confirmation.messageText = @"Удалить модель с Mac?";
     confirmation.informativeText = @"Скачанный GGUF-файл будет удалён. При необходимости его можно скачать заново.";

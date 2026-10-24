@@ -68,3 +68,7 @@ Rust тестирует инструкции и обработку ответо�
 ## Лицензии
 
 FreeLingo: MIT. llama.cpp/ggml: MIT; Qwen3: Apache 2.0. Подробнее — `THIRD_PARTY_NOTICES.md`.
+
+## REA/Replica investigation (2026-10-24)
+
+Отчёт с доказательствами и статусами: `replica/rea-investigation.md`. Отдельный REA не установлен этим репозиторием. Чтобы кратко разобрать фактическое падение на macOS, используй (на системе с Python 3): `python3 tests/crash_triage.py /path/to/FreeLingo.ips`; результат — сводка без полного личного пути, а не диагноз. Не загружай в публичный GitHub оригинальные краш-логи, если в них есть персональные данные.
