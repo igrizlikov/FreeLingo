@@ -1,1 +1,34 @@
 
+name: Build FreeLingo DMG (Apple Silicon)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 85
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build FreeLingo DMG
+        run: |
+          chmod +x build-macos.sh
+          ./build-macos.sh
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeLingo-0.5-AppleSilicon-DMG
+          path: dist/FreeLingo-0.5-AppleSilicon.dmg
+          if-no-files-found: error
