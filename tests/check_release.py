@@ -35,4 +35,19 @@ assert 'hdiutil create' in (root / 'build-macos.sh').read_text()
 assert (root / '.github/workflows/build-dmg.yml').exists()
 ET.parse(root / 'assets/Info.plist')
 subprocess.run(['bash', '-n', str(root / 'build-macos.sh')], check=True)
+subprocess.run(['python3', str(root / 'tests' / 'test_dmg_retry.py')], check=True)
 print('OK: model hashes, GGUF validation, heap SHA, URLSession race guards, Rust API, DMG workflow, plist and shell syntax')
+
+# v0.6: menu-bar app mode and first-party login-item registration.
+assert 'NSApplicationActivationPolicyAccessory' in main
+assert 'setActivationPolicy:policy' in main
+assert 'SMAppService.mainAppService' in main and 'registerAndReturnError:' in main
+assert 'unregisterAndReturnError:' in main
+assert '[self loginItemEnabled]' in main
+assert 'statusIcon.template = YES' in main
+assert (root / 'assets' / 'MenubarIcon-72.png').is_file()
+assert 'SPUStandardUpdaterController' in main
+assert 'SPARKLE_PUBLIC_ED_KEY' in (root / 'build-macos.sh').read_text()
+assert (root / '.github/workflows/release.yml').is_file()
+subprocess.run(['python3', str(root / 'tests' / 'test_appcast.py')], check=True)
+print('OK: menu-bar icon, Dock toggle, Login Items, updater and signed appcast tooling')

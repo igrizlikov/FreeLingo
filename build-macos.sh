@@ -23,10 +23,29 @@ BIN="$APP/Contents/MacOS"
 rm -rf "$APP"
 mkdir -p "$BIN" "$APP/Contents/Resources"
 cp assets/Info.plist "$APP/Contents/Info.plist"
+# Public key is not secret; must match the private EdDSA key used for Releases.
+if [[ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$APP/Contents/Info.plist"
+fi
 cp assets/FreeLingo.icns "$APP/Contents/Resources/FreeLingo.icns"
+cp assets/MenubarIcon-72.png "$APP/Contents/Resources/MenubarIcon.png"
 cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+# Pinned, pre-built Sparkle 2 updater; don't rely on an auto-updated dependency.
+SPARKLE_VERSION=2.9.6
+SPARKLE_DIST="$ROOT/.build/Sparkle-${SPARKLE_VERSION}"
+if [[ ! -d "$SPARKLE_DIST/Sparkle.framework" ]]; then
+  mkdir -p "$SPARKLE_DIST"
+  curl --fail --location --retry 3 --silent --show-error \
+    "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz" \
+    -o "$ROOT/.build/Sparkle-${SPARKLE_VERSION}.tar.xz"
+  tar -xJf "$ROOT/.build/Sparkle-${SPARKLE_VERSION}.tar.xz" -C "$SPARKLE_DIST"
+fi
+[[ -d "$SPARKLE_DIST/Sparkle.framework" ]] || { echo 'ERROR: Sparkle.framework missing' >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+# Ditto preserves Sparkle's nested symlinks and helper signatures.
+ditto "$SPARKLE_DIST/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
 
 # A fixed upstream tag avoids silently compiling an entirely different llama.cpp revision.
 LLAMA_TAG="${LLAMA_TAG:-b11798}"
@@ -72,11 +91,12 @@ cargo test --target aarch64-apple-darwin
 cargo build --release --target aarch64-apple-darwin
 xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=15.0 -fobjc-arc -fmodules \
   -Wno-deprecated-declarations -Wno-multichar \
+  -F "$SPARKLE_DIST" -Wl,-rpath,@executable_path/../Frameworks -framework Sparkle \
   -I "$ROOT/native" "$ROOT/native/main.m" \
   "$ROOT/target/aarch64-apple-darwin/release/libfreelingo_core.a" \
   -framework Cocoa -framework Carbon -framework ApplicationServices \
   -framework CoreGraphics -framework Vision -framework QuartzCore \
-  -framework Security -framework SystemConfiguration \
+  -framework Security -framework SystemConfiguration -framework ServiceManagement \
   -lresolv -liconv -o "$BIN/FreeLingo"
 
 chmod +x "$BIN/FreeLingo" "$BIN/llama-server"
@@ -85,6 +105,10 @@ for component in "$BIN"/*.dylib "$BIN/llama-server"; do
   codesign --force --sign - --timestamp=none "$component"
 done
 codesign --force --sign - --timestamp=none "$APP"
+# Ensure the app resolves Sparkle from the bundle, never the CI build machine.
+otool -L "$BIN/FreeLingo" | grep -F '@rpath/Sparkle.framework/Versions/'
+[[ -f "$APP/Contents/Frameworks/Sparkle.framework/Resources/Info.plist" ]] || \
+  [[ -L "$APP/Contents/Frameworks/Sparkle.framework/Resources" ]]
 codesign --verify --deep --verbose=1 "$APP"
 # Fail the build if any arm64 model-server library points into the CI build
 # directory instead of being bundled with FreeLingo.
@@ -101,11 +125,36 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/FreeLingo.app"
 ln -s /Applications "$STAGE/Applications"
-rm -f "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
-hdiutil create -volname "FreeLingo 0.5.4" -srcfolder "$STAGE" \
-  -format UDZO -imagekey zlib-level=9 -ov "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
-hdiutil verify "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
-echo "DMG built: $ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg"
+# macOS runners sporadically report EBUSY just after copying the stage.
+# Retrying image creation does not alter the compiled app.
+APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+DMG_OUTPUT="$ROOT/dist/FreeLingo-${APP_VERSION}-AppleSilicon.dmg"
+DMG_OK=0
+for attempt in 1 2 3 4 5; do
+  echo "DMG create: attempt $attempt/5"
+  sync
+  sleep "$((attempt * 3))"
+  rm -f "$DMG_OUTPUT"
+  if hdiutil create -volname "FreeLingo ${APP_VERSION}" -srcfolder "$STAGE" \
+      -format UDZO -imagekey zlib-level=9 -ov "$DMG_OUTPUT"; then
+    if hdiutil verify "$DMG_OUTPUT"; then
+      DMG_OK=1
+      break
+    fi
+    echo "WARNING: DMG verification failed on attempt $attempt" >&2
+  else
+    echo "WARNING: hdiutil create failed on attempt $attempt" >&2
+  fi
+done
+if [[ "$DMG_OK" -ne 1 ]]; then
+  echo "ERROR: Could not create a verified DMG after 5 attempts" >&2
+  hdiutil info || true
+  exit 1
+fi
+echo "DMG built: $ROOT/dist/FreeLingo-${APP_VERSION}-AppleSilicon.dmg"
 
 # Record a reproducible checksum for the GitHub Actions artifact.
-shasum -a 256 "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg" > "$ROOT/dist/FreeLingo-0.5.4-AppleSilicon.dmg.sha256"
+shasum -a 256 "$ROOT/dist/FreeLingo-${APP_VERSION}-AppleSilicon.dmg" > "$ROOT/dist/FreeLingo-${APP_VERSION}-AppleSilicon.dmg.sha256"
+
+# Sparkle update archive: avoids distributing a DMG for in-app updates.
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ROOT/dist/FreeLingo-${APP_VERSION}-AppleSilicon.zip"

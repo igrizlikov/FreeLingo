@@ -7,3 +7,6 @@ FreeLingo (собственный код): MIT, см. `LICENSE` в исходн�
 Модели **Qwen3** (0.6B, 1.7B, 4B) — Apache 2.0. Модели **не входят в установочный DMG**. Пользователь самостоятельно выбирает и загружает модель из указанных репозиториев Hugging Face. Полный текст Apache 2.0 и карточки моделей: https://huggingface.co/Qwen .
 
 При распространении собранного приложения следует проверить дополнительные уведомления о лицензиях транзитивных зависимостей конкретной сборки.
+
+## Sparkle 2
+Sparkle update framework (https://github.com/sparkle-project/Sparkle) is used to securely deliver optional in-app updates. Sparkle is available under the MIT license; check the bundled framework's LICENSE for the complete text. The public repository does not include any private EdDSA signing keys.

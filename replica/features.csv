@@ -16,3 +16,7 @@ F14,Model switching and deletion,Models,should,untested,native/ModelWindow.inc,R
 F15,Dictionary alternatives,UX,could,missing,No source implementation,DeepL parity gap
 F16,TTS speed and text size,UX,could,missing,No source implementation,DeepL parity gap
 F17,Startup background behavior,macOS,could,partial,native/main.m status bar item and applicationShouldTerminateAfterLastWindowClosed,Autostart preferences missing
+F12,Hide Dock icon while keeping menu bar,AppKit,must,untested,native/main.m NSApplicationActivationPolicyAccessory and showDockIcon,Needs macOS E2E test after update
+F13,Launch at login,ServiceManagement,must,untested,native/main.m SMAppService.mainAppService register/unregister,Needs macOS permissions and real login test
+F14,In-app update,Updater,must,blocked,native/main.m SPUStandardUpdaterController; release.yml,Requires one-time signing secret and public key in GitHub Actions
+F15,Native template menu-bar icon,AppKit,should,untested,assets/MenubarIcon.svg and PNG and native/main.m,Needs menu bar check in light/dark appearance

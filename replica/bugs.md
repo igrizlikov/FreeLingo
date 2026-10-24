@@ -14,3 +14,11 @@
 | S3 | История только в памяти текущего запуска | `native/main.m` | Не изменено | Добавить постоянное локальное хранение с opt-out |
 
 **Не установлено:** точная причина конкретного macOS crash без `.ips` и результат работы текущего исправления на Mac. Статический аудит и smoke-тесты не заменяют GUI E2E.
+
+## CI-DMG-001: hdiutil Resource busy on GitHub macOS 15 (2026-10-24)
+
+- Severity S2, blocks DMG artifact, not compilation.
+- OBSERVED: run 108781400808 fails at `hdiutil create -srcfolder` with `Resource busy`, after Rust tests 4/4, arm64 binaries and signing.
+- CAUSE STATUS: CI EBUSY transient is likely; exact resource holder UNKNOWN (no system trace).
+- FIX: sync, five bounded retries with backoff, remove partial image and verify before upload.
+- STATUS: shell syntax and mocked retry tests locally; real macOS CI UNTESTED.

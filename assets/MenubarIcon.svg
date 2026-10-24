@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24">
+<!-- a directional letter F: clean template artwork for Light/Dark macOS menu bar -->
+<path fill="#000" d="M4.5 3.5c0-.8.65-1.45 1.45-1.45h12.1a1.45 1.45 0 0 1 0 2.9H7.4v5.1h8.0a1.45 1.45 0 0 1 0 2.9h-8v7.55a1.45 1.45 0 0 1-2.9 0V3.5Z"/>
+<path fill="#000" d="M16.3 17.05h3.25l-1.05-1.02a1.05 1.05 0 0 1 1.49-1.49l2.85 2.85c.41.41.41 1.08 0 1.49l-2.85 2.85a1.05 1.05 0 0 1-1.49-1.49l1.05-1.02H16.3a1.08 1.08 0 0 1 0-2.17Z"/>
+</svg>

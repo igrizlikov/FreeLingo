@@ -6,6 +6,8 @@
 #import <Vision/Vision.h>
 #import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <Sparkle/Sparkle.h>
+#import <ServiceManagement/ServiceManagement.h>
 #include "ModelManager.inc"
 #import "FreeLingoCore.h"
 
@@ -115,6 +117,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSWindow *_mainWindow;
     NSPanel *_quickPanel;
     NSStatusItem *_statusItem;
+    SPUStandardUpdaterController *_updaterController;
+    NSMenuItem *_dockMenuItem;
+    NSMenuItem *_loginMenuItem;
+    NSMenuItem *_updateMenuItem;
     NSTextView *_sourceEditor;
     NSTextView *_resultEditor;
     NSTextView *_quickEditor;
@@ -154,15 +160,25 @@ static void FLRustCallback(char *raw, int success, void *context) {
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     (void)note;
     _sessionHistory = [NSMutableArray new];
-    [NSUserDefaults.standardUserDefaults registerDefaults:@{ @"modelID": @"qwen3-1.7b", @"languageIndex": @0 }];
+    [NSUserDefaults.standardUserDefaults registerDefaults:@{
+        @"modelID": @"qwen3-1.7b", @"languageIndex": @0,
+        @"showDockIcon": @NO
+    }];
     [self createApplicationMenu];
     [self createMainWindow];
     [self createQuickPanel];
     [self createStatusMenu];
     [self createModelsWindow];
+    [self applyDockPreference];
+    [self configureUpdates];
     [self registerGlobalHotkeys];
-    [_mainWindow makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
+    // Dockless mode launches quietly and stays available from the menu bar.
+    // Users can open the full UI from the status menu or a global shortcut.
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"]) {
+        [_mainWindow makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    }
+    // First-time setup still opens the model picker in dockless mode.
     if (![self hasActiveModel]) [self showModels:nil];
 }
 
@@ -196,6 +212,9 @@ static void FLRustCallback(char *raw, int success, void *context) {
     models.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     models.target = self;
     [application addItem:models];
+    NSMenuItem *checkUpdate = [[NSMenuItem alloc] initWithTitle:@"Проверить обновления…" action:@selector(checkForUpdates:) keyEquivalent:@""];
+    checkUpdate.target = self;
+    [application addItem:checkUpdate];
     [application addItem:NSMenuItem.separatorItem];
     [application addItemWithTitle:@"Скрыть FreeLingo" action:@selector(hide:) keyEquivalent:@"h"];
     [application addItemWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@"q"];
@@ -336,7 +355,16 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 - (void)createStatusMenu {
     _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
-    _statusItem.button.title = @"文";
+    NSImage *statusIcon = [[NSImage alloc] initWithContentsOfFile:
+        [NSBundle.mainBundle pathForResource:@"MenubarIcon" ofType:@"png"]];
+    if (statusIcon) {
+        statusIcon.size = NSMakeSize(18, 18);
+        statusIcon.template = YES; // auto-contrasts with light/dark macOS menu bars
+        _statusItem.button.image = statusIcon;
+        _statusItem.button.imagePosition = NSImageOnly;
+    } else {
+        _statusItem.button.title = @"F⇄";
+    }
     _statusItem.button.toolTip = @"FreeLingo — локальный переводчик";
     NSMenu *menu = [NSMenu new];
     NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Открыть FreeLingo" action:@selector(showMain:) keyEquivalent:@""];
@@ -352,9 +380,81 @@ static void FLRustCallback(char *raw, int success, void *context) {
     models.target = self; [menu addItem:models];
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Настройки…" action:@selector(showSettings:) keyEquivalent:@""];
     settings.target = self; [menu addItem:settings];
+    _dockMenuItem = [[NSMenuItem alloc] initWithTitle:@"Показывать значок в Dock" action:@selector(toggleDockIcon:) keyEquivalent:@""];
+    _dockMenuItem.target = self;
+    _dockMenuItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:_dockMenuItem];
+    _loginMenuItem = [[NSMenuItem alloc] initWithTitle:@"Запускать при входе в macOS" action:@selector(toggleLoginItem:) keyEquivalent:@""];
+    _loginMenuItem.target = self;
+    _loginMenuItem.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:_loginMenuItem];
+    _updateMenuItem = [[NSMenuItem alloc] initWithTitle:@"Проверить обновления…" action:@selector(checkForUpdates:) keyEquivalent:@""];
+    _updateMenuItem.target = self;
+    [menu addItem:_updateMenuItem];
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@""];
     [menu addItem:quit];
     _statusItem.menu = menu;
+}
+
+// Accessory mode has no Dock icon but keeps status item, hotkeys and windows.
+- (void)applyDockPreference {
+    BOOL showDock = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"];
+    NSApplicationActivationPolicy policy = showDock ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    if (NSApp.activationPolicy != policy && ![NSApp setActivationPolicy:policy]) {
+        [self presentMessage:@"Не удалось изменить режим отображения в Dock."];
+        return;
+    }
+    _dockMenuItem.state = showDock ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)toggleDockIcon:(id)sender {
+    (void)sender;
+    BOOL currentlyShown = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"];
+    [NSUserDefaults.standardUserDefaults setBool:!currentlyShown forKey:@"showDockIcon"];
+    [self applyDockPreference];
+}
+
+// ServiceManagement stores the real login-item state in macOS, not UserDefaults.
+- (BOOL)loginItemEnabled {
+    return SMAppService.mainAppService.status == SMAppServiceStatusEnabled;
+}
+
+- (BOOL)setLoginItemEnabled:(BOOL)enabled {
+    SMAppService *service = SMAppService.mainAppService;
+    if ((service.status == SMAppServiceStatusEnabled) == enabled) return YES;
+    NSError *error = nil;
+    BOOL ok = enabled ? [service registerAndReturnError:&error] : [service unregisterAndReturnError:&error];
+    if (!ok) {
+        [self presentMessage:[NSString stringWithFormat:@"Не удалось изменить автозапуск: %@\nПроверь Системные настройки → Основные → Объекты входа и расширения.",
+                              error.localizedDescription ?: @"неизвестная ошибка"]];
+    }
+    return ok;
+}
+
+- (void)toggleLoginItem:(id)sender {
+    (void)sender;
+    [self setLoginItemEnabled:![self loginItemEnabled]];
+    _loginMenuItem.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)configureUpdates {
+    // If the repository owner has not configured signing, explicitly disable
+    // the updater. Never install an unverified remote executable.
+    NSString *publicKey = [NSBundle.mainBundle objectForInfoDictionaryKey:@"SUPublicEDKey"];
+    NSString *feed = [NSBundle.mainBundle objectForInfoDictionaryKey:@"SUFeedURL"];
+    if (publicKey.length == 0 || feed.length == 0) return;
+    _updaterController = [[SPUStandardUpdaterController alloc] initWithStartingUpdater:YES
+                                                                     updaterDelegate:nil
+                                                                  userDriverDelegate:nil];
+}
+
+- (void)checkForUpdates:(id)sender {
+    if (!_updaterController) {
+        [self presentMessage:@"Автообновления пока не активированы в этой сборке. Владелец репозитория должен один раз настроить подпись Sparkle и выпуск GitHub Releases."];
+        return;
+    }
+    [NSApp activateIgnoringOtherApps:YES];
+    [_updaterController checkForUpdates:sender];
 }
 
 - (void)registerGlobalHotkeys {
@@ -696,7 +796,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSURL *url = panel.URL;
     NSString *ext = url.pathExtension.lowercaseString;
     if (![@[@"txt", @"md"] containsObject:ext]) {
-        [self presentMessage:@"В версии 0.5 поддерживается импорт TXT и MD. DOCX, PDF и SRT/VTT с сохранением структуры пока не реализованы."];
+        [self presentMessage:@"Поддерживается импорт TXT и MD. DOCX, PDF и SRT/VTT с сохранением структуры пока не реализованы."];
         return;
     }
     NSError *error = nil;
@@ -724,13 +824,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
 - (void)showSettings:(id)sender {
     (void)sender;
     NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Горячие клавиши FreeLingo";
+    alert.messageText = @"Настройки FreeLingo";
     alert.informativeText = @"Все модели работают локально. Для скачивания и переключения нажми «Модели…» в основном окне.";
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 145)];
+    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 232)];
     NSArray<NSString *> *names = @[@"Перевести выделение", @"Улучшить текст", @"OCR области экрана"];
     NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray new];
     for (unsigned i = 0; i < 3; ++i) {
-        CGFloat y = 99 - 39*i;
+        CGFloat y = 168 - 39*i;
         NSTextField *row = FLLabel(names[i], 12);
         row.frame = NSMakeRect(0, y + 2, 173, 20);
         [form addSubview:row];
@@ -741,6 +841,16 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [form addSubview:popup];
         [popups addObject:popup];
     }
+    NSButton *dockCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, 40, 425, 22)];
+    dockCheckbox.buttonType = NSButtonTypeSwitch;
+    dockCheckbox.title = @"Показывать иконку приложения в Dock";
+    dockCheckbox.state = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [form addSubview:dockCheckbox];
+    NSButton *loginCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 425, 22)];
+    loginCheckbox.buttonType = NSButtonTypeSwitch;
+    loginCheckbox.title = @"Запускать при входе в macOS";
+    loginCheckbox.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+    [form addSubview:loginCheckbox];
     alert.accessoryView = form;
     [alert addButtonWithTitle:@"Сохранить"];
     [alert addButtonWithTitle:@"Отмена"];
@@ -748,6 +858,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
         for (unsigned i = 0; i < 3; ++i)
             [NSUserDefaults.standardUserDefaults setInteger:popups[i].indexOfSelectedItem forKey:FLShortcutSetting(i)];
         [self registerGlobalHotkeys];
+        [NSUserDefaults.standardUserDefaults setBool:(dockCheckbox.state == NSControlStateValueOn) forKey:@"showDockIcon"];
+        [self applyDockPreference];
+        if ((loginCheckbox.state == NSControlStateValueOn) != [self loginItemEnabled]) {
+            [self setLoginItemEnabled:(loginCheckbox.state == NSControlStateValueOn)];
+        }
+        _loginMenuItem.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
     }
 }
 
@@ -764,7 +880,9 @@ int main(int argc, const char *argv[]) {
     (void)argc; (void)argv;
     @autoreleasepool {
         NSApplication *app = NSApplication.sharedApplication;
-        app.activationPolicy = NSApplicationActivationPolicyRegular;
+        app.activationPolicy = [[NSUserDefaults standardUserDefaults] objectForKey:@"showDockIcon"] == nil ||
+            ![[NSUserDefaults standardUserDefaults] boolForKey:@"showDockIcon"]
+            ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular;
         FLAppDelegate *delegate = [FLAppDelegate new];
         app.delegate = delegate;
         [app run];
