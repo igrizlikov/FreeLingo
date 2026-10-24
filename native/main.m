@@ -52,7 +52,7 @@ static NSTextField *FLLabel(NSString *s, CGFloat size) {
     t.textColor = NSColor.secondaryLabelColor;
     return t;
 }
-static NSScrollView *FLEditor(NSTextView **out, BOOL editable) {
+static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
