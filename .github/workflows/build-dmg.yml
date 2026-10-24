@@ -1,34 +1,79 @@
-
 name: Build FreeLingo DMG (Apple Silicon)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_model_smoke:
+        description: "Download a test GGUF and perform real local inference"
+        type: boolean
+        default: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 85
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Apply uploaded FreeLingo 0.5.4 update if present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f FreeLingo-0.5.4-update.zip ]]; then
+            unzip -oq FreeLingo-0.5.4-update.zip -d .
+            echo "Imported source bundle 0.5.4"
+          else
+            echo "No source bundle found; building current repo"
+          fi
+
+      - name: Configure Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
 
-      - name: Build FreeLingo DMG
+      - name: Offline audit and regression tests
+        run: python3 tests/check_release.py
+
+      - name: Build native app, bundled llama.cpp and DMG
         run: |
           chmod +x build-macos.sh
           ./build-macos.sh
 
-      - name: Upload DMG
+      - name: Smoke test on macOS - llama.cpp loads GGUF and translates
+        if: ${{ inputs.run_model_smoke }}
+        run: python3 tests/smoke_macos.py
+
+      - name: Upload installable DMG
         uses: actions/upload-artifact@v4
         with:
-          name: FreeLingo-0.5-AppleSilicon-DMG
-          path: dist/FreeLingo-0.5-AppleSilicon.dmg
+          name: FreeLingo-0.5.4-AppleSilicon-DMG
+          path: |
+            dist/FreeLingo-0.5.4-AppleSilicon.dmg
+            dist/FreeLingo-0.5.4-AppleSilicon.dmg.sha256
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Save audited update back to main after a successful build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f FreeLingo-0.5.4-update.zip ]]; then
+            echo "Source bundle absent; no source update needed"
+            exit 0
+          fi
+          rm FreeLingo-0.5.4-update.zip
+          # Preserve this install-and-build workflow for future runs.
+          git restore --source=HEAD --staged --worktree .github/workflows/build-dmg.yml
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No source changes"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'FreeLingo 0.5.4: audit fixes, model checks and smoke tests'
+          git push origin HEAD:main
