@@ -1,24 +1,16 @@
 id,feature,area,priority,status,evidence,notes
-F01,Local text translation,Rust engine,must,untested,src/lib.rs and macOS CI smoke added,Requires successful GGUF inference and UI E2E on Mac
-F02,Download verify select models,Model manager,must,partial,native/ModelWindow.inc; native/ModelManager.inc; user reports crash,0.5.4 changes untested on Mac
-F03,Global translation shortcut,AppKit Carbon,must,untested,native/main.m RegisterEventHotKey,Requires TextEdit/Safari validation and Accessibility permission
-F04,Quick popup,AppKit,must,untested,native/main.m NSPanel,Placement and focus untested on Mac
-F05,Safe replace selection,AppKit Accessibility,must,partial,native/main.m compare selected text plus re-check on paste,No E2E test on TextEdit/Safari
-F06,Standalone Apple Silicon DMG,CI packaging,must,partial,User screenshot successful 0.5.1 GitHub Actions job #3,0.5.4 not yet built or installed
-F07,Offline inference,Backend,must,untested,src/lib.rs loopback private llama-server,Verify network disabled after download
-F08,OCR selected screen area,Vision,should,untested,native/main.m VNRecognizeTextRequest,Screen Recording permissions and OCR not E2E verified
-F09,Text rewriting,Backend,should,untested,src/lib.rs rewrite prompt,Quality/target behavior not verified
-F10,Translation history,UX,should,partial,native/main.m in-memory history only,Not persisted; original history preferences not implemented
-F11,DOCX PDF PPTX translation,Files,should,missing,native/main.m openTextFile supports txt/md,Preserving complex formatting is not implemented
-F12,SRT/VTT translation,Files,should,missing,native/main.m no subtitle parser,Important for film editing
-F13,User-configurable hotkeys,AppKit,should,untested,native/main.m showSettings,Only four presets/action and no UI tests
-F14,Model switching and deletion,Models,should,untested,native/ModelWindow.inc,Runtime process restart and deletion not verified
-F15,Dictionary alternatives,UX,could,missing,No source implementation,DeepL parity gap
-F16,TTS speed and text size,UX,could,missing,No source implementation,DeepL parity gap
-F17,Startup background behavior,macOS,could,partial,native/main.m status bar item and applicationShouldTerminateAfterLastWindowClosed,Autostart preferences missing
-F12,Hide Dock icon while keeping menu bar,AppKit,must,untested,native/main.m NSApplicationActivationPolicyAccessory and showDockIcon,Needs macOS E2E test after update
-F13,Launch at login,ServiceManagement,must,untested,native/main.m SMAppService.mainAppService register/unregister,Needs macOS permissions and real login test
-F14,In-app update,Updater,must,blocked,native/main.m SPUStandardUpdaterController; release.yml,Requires one-time signing secret and public key in GitHub Actions
-F15,Native template menu-bar icon,AppKit,should,untested,assets/MenubarIcon.svg and PNG and native/main.m,Needs menu bar check in light/dark appearance
-F13,Editable translation in floating panel,UI,must,untested,native/main.m; user screenshot and report,0.6.1 change requires macOS E2E test
-F14,Natural English to Russian paragraph translation,Core,must,untested,src/lib.rs; Qwen3 8B file metadata,User sample regression must be tested with installed model
+F01,Local Qwen3 4B text translation,Rust/AppKit,must,partial,User says 0.6.2 translates; quality issue reproduced via sample,0.6.3 quality adjustments not yet tested
+F02,Model install and switching,Models,must,partial,User reports Qwen3 4B installed and working,Not every model retested
+F03,Global translation shortcut,AppKit,must,partial,User previously confirmed app works,Needs individual 0.6.3 E2E test
+F04,Floating popup,AppKit,must,partial,User captured popup and edit failure,Quick-edit reentrancy guard not yet verified
+F05,Editable popup and safe replacement,UI,must,untested,0.6.3 source changes only,Requires ten edit toggles and TextEdit replace
+F06,Standalone Apple Silicon app and DMG,CI,must,partial,User has running 0.6.2 installed,0.6.3 CI not yet run
+F07,Offline inference,Rust,must,partial,Local model is selected,Airplane-mode retest needed
+F08,Auto-update from 0.6.2 to 0.6.3,Sparkle,must,untested,User sees all updated on 0.6.2 and v0.6.2 signed release,First real upgrade pending
+F09,Login item and hide Dock,AppKit,should,partial,User reported 0.6.0 functions work,Version regression check
+F10,OCR screen area,Vision,should,untested,Source exists,Real OCR check pending
+F11,Rewrite text,Rust,should,untested,Source exists,Real rewrite check pending
+F12,Translate DOCX/PDF/PPTX,Files,should,missing,Only TXT and MD,Not implemented
+F13,Translate SRT/VTT,Files,should,missing,No subtitle-specific parser,Not implemented
+F14,Persistent translation history,History,should,missing,Session-only history,Not implemented
+F15,Dictionary and alternatives,UX,could,missing,No implementation,Not implemented

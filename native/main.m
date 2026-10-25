@@ -138,6 +138,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     AXUIElementRef _originElement;
     NSString *_originSelection;
     BOOL _lastTranslationOK;
+    BOOL _quickEditTransitioning; // guards rapid/reentrant button activations
     NSUInteger _quickGeneration;
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *_sessionHistory;
     EventHotKeyRef _translateHotkey;
@@ -535,6 +536,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _currentQuickMode = [mode copy];
     _lastTranslationOK = NO;
     _replaceButton.enabled = NO;
+    _quickEditButton.enabled = NO;
     _quickEditor.string = @"Перевод…";
     [_quickLanguage selectItemAtIndex:_mainLanguage.indexOfSelectedItem];
     NSPoint cursor = NSEvent.mouseLocation;
@@ -567,7 +569,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     job.mode = mode;
     job.quick = quick;
     job.generation = quick ? ++_quickGeneration : 0;
-    if (quick) _quickEditor.string = @"Обрабатываю локальной моделью…";
+    if (quick) { _quickEditButton.enabled = NO; _quickEditor.string = @"Обрабатываю локальной моделью…"; }
     else { _resultEditor.string = @"Обрабатываю локальной моделью…"; _workButton.enabled = NO; }
     fl_work_async(text.UTF8String, language.UTF8String, mode.UTF8String, model.UTF8String,
                   FLRustCallback, (__bridge_retained void *)job);
@@ -580,6 +582,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         _currentQuickResult = ok ? result : @"";
         _quickEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
         _lastTranslationOK = ok;
+        _quickEditButton.enabled = ok && _currentQuickResult.length > 0;
         _replaceButton.enabled = ok && (_originElement != NULL) && ([_originSelection isEqualToString:job.source]);
     } else {
         _resultEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
@@ -632,8 +635,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
 // Do not move between an NSPanel and a dockless main NSWindow just to edit.
 // Editing in place also preserves the original selection used by Replace.
 - (void)finishQuickEditing {
-    if (!_quickEditor) return;
+    if (!_quickEditor || !_quickEditButton) return;
     if (_quickEditor.editable) {
+        // Commit the IME composition and resign the text view BEFORE changing
+        // its editability. The button may be triggered repeatedly while the
+        // panel is key; never remove editing from the active responder.
+        if ([_quickPanel.firstResponder isKindOfClass:NSTextView.class]) {
+            [_quickPanel makeFirstResponder:_quickEditButton];
+        }
         _currentQuickResult = [_quickEditor.string copy];
         _quickEditor.editable = NO;
     }
@@ -641,20 +650,34 @@ static void FLRustCallback(char *raw, int success, void *context) {
 }
 - (void)editQuick:(id)sender {
     (void)sender;
-    if (!_currentQuickResult.length) {
-        [self presentMessage:@"Сначала получи перевод, затем его можно будет исправить."];
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self editQuick:nil]; });
         return;
     }
-    if (_quickEditor.editable) {
-        [self finishQuickEditing];
-        return;
+    if (_quickEditTransitioning || !_quickPanel || !_quickEditor || !_quickEditButton) return;
+    _quickEditTransitioning = YES;
+    @try {
+        if (_quickEditor.editable) {
+            [self finishQuickEditing];
+            return;
+        }
+        if (!_lastTranslationOK || !_currentQuickResult.length) {
+            [self presentMessage:@"Сначала получи перевод, затем его можно будет исправить."];
+            return;
+        }
+        _quickEditor.editable = YES;
+        _quickEditButton.title = @"Готово";
+        [_quickPanel makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (![_quickPanel makeFirstResponder:_quickEditor]) {
+            _quickEditor.editable = NO;
+            _quickEditButton.title = @"Редактировать";
+            return;
+        }
+        [_quickEditor setSelectedRange:NSMakeRange(_quickEditor.string.length, 0)];
+    } @finally {
+        _quickEditTransitioning = NO;
     }
-    _quickEditor.editable = YES;
-    _quickEditButton.title = @"Готово";
-    [_quickPanel makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-    [_quickPanel makeFirstResponder:_quickEditor];
-    [_quickEditor setSelectedRange:NSMakeRange(_quickEditor.string.length, 0)];
 }
 - (void)textDidChange:(NSNotification *)notification {
     if (notification.object == _quickEditor && _quickEditor.editable) {
@@ -666,6 +689,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 - (void)dismissQuick:(id)sender {
     (void)sender;
     [self finishQuickEditing];
+    ++_quickGeneration; // invalidate results from requests finishing after Close
     [_quickPanel orderOut:nil];
 }
 - (void)copyQuick:(id)sender {

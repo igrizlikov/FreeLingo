@@ -59,8 +59,19 @@ assert '- (void)textDidChange:(NSNotification *)notification' in main
 assert '[_quickPanel makeFirstResponder:_quickEditor]' in main
 assert 'finishQuickEditing' in main
 assert 'split_long_line(body, 1100)' in core
-assert 'has_cjk(&result)' in core
+assert 'quality_issue(source, &result, target)' in core
 assert '"enable_thinking": false' in core
 assert 'Qwen3-8B-Q4_K_M.gguf' in model
 assert 'd98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785' in model
 print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
+
+# v0.6.3: editor hardening and stricter translation instructions.
+import plistlib
+plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
+assert plist['CFBundleShortVersionString'] == '0.6.3'
+assert int(plist['CFBundleVersion']) == 13
+assert '_quickEditTransitioning' in main
+assert '_quickPanel makeFirstResponder:_quickEditButton' in main
+assert 'quality_issue(source, &result, target)' in core
+assert '--ctx-size", "6144"' in core
+print('OK: version, editor reentrancy guards and translation quality checks')

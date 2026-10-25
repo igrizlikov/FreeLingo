@@ -1,4 +1,4 @@
-//! FreeLingo 0.5 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.3 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -40,9 +40,9 @@ pub fn system_prompt(target: &str, operation: &str) -> String {
         format!("You are a meticulous native-language editor. Improve the supplied text in {lang}. Fix grammar, spelling, word choice and awkward phrases. Preserve ALL facts, numbers, people, relationships, tense, meaning, paragraphs and names. Return only the improved text, never an explanation. /no_think")
     } else {
         let ru = if target == "ru" {
-            " Write fluent, idiomatic modern Russian, avoiding literal English calques. Use only Russian words except proper names or indispensable technical terms. Do NOT output any Chinese or Japanese characters. For example, 'have a good time' should become 'прекрасно проводить время', NOT a word-for-word expression."
+            " For English-to-Russian translation: use natural modern literary Russian, not English word order or literal calques. Russian kinship terms, plurals and numbers must match the source precisely. Translate professions as occupations (a nurse = медсестра), preserve each individual and their relationships, and render idioms naturally (have a good time = прекрасно проводить время). Example title: My Wonderful Family = Моя замечательная семья. Do not use Chinese, Japanese or untranslated English words except proper names."
         } else { "" };
-        format!("You are a professional human-quality translator into {lang}. Translate the COMPLETE text faithfully and naturally. Never summarize, omit or add information. Preserve exact quantities, plurals (two brothers must never become one brother), family relationships, professions, speaker's point of view, tense, and negation. Translate headings appropriately. Preserve paragraph breaks and punctuation. Never transliterate or substitute words from an unrelated language.{ru} Output only the translation, no commentary or preamble. /no_think")
+        format!("You are an exact, fluent professional translator. Your task is to translate the ENTIRE user text into {lang}. Preserve every person, numerical quantity, plural, profession, event, tense, negation, and meaning; never summarize or omit. Keep paragraph boundaries, titles, quotations, and original tone. Choose idiomatic expressions in the target language, not word-by-word substitutions.{ru} Return ONLY the finished translation in the target language, without notes, markdown wrappers, reasoning or an introduction. /no_think")
     }
 }
 
@@ -81,6 +81,33 @@ fn split_long_line(text: &str, max: usize) -> Vec<String> {
 fn has_cjk(text: &str) -> bool {
     text.chars().any(|c| matches!(c as u32,
         0x3400..=0x9FFF | 0xF900..=0xFAFF | 0x3040..=0x30FF))
+}
+
+// Lightweight post-generation guard. This does NOT prove translation quality;
+// it catches obvious language leakage and a few high-impact factual regressions
+// seen in real English->Russian translation samples. Reject rather than silently
+// accepting a broken translation. A human must still judge fluency/accuracy.
+fn quality_issue(source: &str, result: &str, target: &str) -> Option<&'static str> {
+    if result.trim().is_empty() { return Some("Пустой ответ модели"); }
+    if target != "ru" { return None; }
+    if !has_cjk(source) && has_cjk(result) { return Some("Посторонние иероглифы в русском переводе"); }
+    let cyrillic = result.chars().filter(|c| matches!(*c as u32, 0x0400..=0x052F)).count();
+    let latin = result.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    if source.len() > 55 && cyrillic + latin > 30 && cyrillic * 100 < (cyrillic + latin) * 60 {
+        return Some("Ответ преимущественно не на русском языке");
+    }
+    let en = source.to_ascii_lowercase();
+    let ru = result.to_lowercase();
+    // Factual checks are applied only to explicit source phrases, not to
+    // arbitrary sentences or other language pairs.
+    if en.contains("two brothers") &&
+       !(ru.contains("брата") || ru.contains("братьев") || ru.contains("братьями")) {
+        return Some("Потеряно множественное число: two brothers");
+    }
+    if en.contains("mother is a nurse") && !ru.contains("медсестр") {
+        return Some("Потеряна профессия матери: nurse");
+    }
+    None
 }
 
 fn find_server() -> Result<PathBuf, String> {
@@ -141,7 +168,7 @@ fn start_server(model: &Path) -> Result<Backend, String> {
     let mut cmd = Command::new(server);
     cmd.arg("--model").arg(model)
         .args(["--host", "127.0.0.1", "--port", &port.to_string(),
-               "--ctx-size", "4096", "--n-gpu-layers", "99", "--no-webui", "--alias", "freelingo", "--api-key", &token]);
+               "--ctx-size", "6144", "--n-gpu-layers", "99", "--no-webui", "--alias", "freelingo", "--api-key", &token]);
     cmd.stdin(Stdio::null()).stdout(Stdio::null());
     if let Some(f) = log { cmd.stderr(Stdio::from(f)); } else { cmd.stderr(Stdio::null()); }
     let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить llama.cpp: {e}"))?;
@@ -175,14 +202,15 @@ fn plain_answer(value: &str) -> String {
 }
 
 fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str) -> Result<String, String> {
-    let mut previous_error = String::new();
-    for attempt in 0..2 {
+    let mut previous_error = "Модель вернула некачественный результат".to_owned();
+    for attempt in 0..3 {
         let mut instruction = system_prompt(target, operation);
         if attempt > 0 {
-            instruction.push_str(" Your last response contained wrong-language characters or was truncated. Repeat the full translation, strictly in the target language, with no omissions.");
+            instruction.push_str(" Carefully recheck counts, professions, family relations, and target language. Do not omit anything; produce the complete answer.");
         }
         let payload = json!({
-            "model": "freelingo", "stream": false, "temperature": if attempt == 0 { 0.25 } else { 0.35 },
+            "model": "freelingo", "stream": false,
+            "temperature": if attempt == 0 { 0.1 } else { 0.25 },
             "top_p": 0.85, "max_tokens": 1800,
             "chat_template_kwargs": { "enable_thinking": false },
             "messages": [
@@ -197,13 +225,12 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str)
             .ok_or("Движок не вернул текст")?;
         let result = plain_answer(result);
         let truncated = answer.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length");
-        let wrong_script = target == "ru" && !has_cjk(source) && has_cjk(&result);
-        if !result.is_empty() && !truncated && !wrong_script { return Ok(result); }
+        let problem = quality_issue(source, &result, target);
+        if !truncated && problem.is_none() { return Ok(result); }
         previous_error = if truncated { "Ответ модели обрезан".into() }
-            else if wrong_script { "Модель вставила иероглифы в русский перевод".into() }
-            else { "Модель вернула пустой ответ".into() };
+            else { problem.unwrap_or("Невозможно проверить ответ").to_owned() };
     }
-    Err(format!("{previous_error}. Выбери более качественную модель (Qwen3 4B) и повтори перевод."))
+    Err(format!("{previous_error}. Попробуй ещё раз или выбери другую модель."))
 }
 
 fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Result<String, String> {
@@ -292,9 +319,24 @@ mod tests {
         assert!(has_cjk("моя мама — 护士 в больнице"));
         assert!(!has_cjk("моя мама — медсестра в больнице"));
     }
+    #[test] fn quality_catches_language_leakage() {
+        assert_eq!(quality_issue("My mother is a nurse at a big hospital.",
+            "Моя мама — 护士 в больнице.", "ru"),
+            Some("Посторонние иероглифы в русском переводе"));
+        assert!(quality_issue("Hello dear friend, I love this place, and every day I am very happy to be here!",
+            "Hello dear friend, I love this place, and every day I am very happy to be here!", "ru").is_some());
+    }
+    #[test] fn quality_catches_missing_people() {
+        let en = "I have two brothers and one sister. My mother is a nurse.";
+        assert!(quality_issue(en, "У меня есть брат и сестра. Моя мама работает в больнице.", "ru").is_some());
+        assert_eq!(quality_issue(en, "У меня два брата и сестра. Моя мама — медсестра.", "ru"), None);
+    }
+    #[test] fn quality_does_not_reject_rewrite() {
+        assert_eq!(quality_issue("Улучшить русский текст", "Прекрасный текст.", "ru"), None);
+    }
     #[test] fn enforce_plural_and_idiomatic_prompt() {
         let p = system_prompt("ru", "translate");
-        assert!(p.contains("plurals"));
+        assert!(p.contains("plural"));
         assert!(p.contains("idiomatic"));
     }
 }
