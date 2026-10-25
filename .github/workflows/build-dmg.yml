@@ -1,71 +1,67 @@
-65
-66
-67
-68
-69
-70
-71
-72
-73
-74
-75
-76
-77
-78
-79
-80
-81
-82
-83
-84
-85
-86
-87
-88
-89
-90
-91
-92
-93
-94
-95
-96
-97
-98
-99
-100
-101
-102
-103
-104
-105
-106
-107
-108
-109
-110
-111
-112
-113
-114
-115
-116
-117
-118
-119
-120
-121
-122
-123
-124
-125
-126
-127
-128
-129
-130
-131
-132
+name: Publish FreeLingo signed update
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: 'Source archive placed in repository root (zip)'
+        required: true
+        default: 'FreeLingo066.zip'
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: freelingo-release
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: macos-15
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import next release source ZIP
+        env:
+          SOURCE_ZIP: ${{ inputs.source_zip }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_ZIP" =~ ^[a-zA-Z0-9_.-]+\.zip$ ]] || { echo 'Invalid ZIP name'; exit 1; }
+          test -f "$SOURCE_ZIP" || { echo "Upload $SOURCE_ZIP to the repository root first"; exit 1; }
+          unzip -oq "$SOURCE_ZIP" -d .
+          rm -f "$SOURCE_ZIP"
+      - name: Require release signing keys
+        env:
+          PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        shell: bash
+        run: |
+          [[ -n "$PUBLIC_KEY" && -n "$PRIVATE_KEY" ]] || { echo 'Configure Sparkle public variable and private secret, then rerun'; exit 1; }
+      - name: Import optional persistent code signing certificate
+        shell: bash
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERT_P12_BASE64" ]]; then
+            echo 'WARNING: no persistent macOS signing identity; Accessibility may reset each update.'
+            exit 0
+          fi
+          [[ -n "$CERT_PASSWORD" ]] || { echo 'ERROR: missing P12 password'; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/FreeLingoSigning.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12="$RUNNER_TEMP/FreeLingoSigning.p12"
+          umask 077
+          printf '%s' "$CERT_P12_BASE64" | base64 -D > "$P12" || \
+            { echo 'P12 base64 invalid'; exit 1; }
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$P12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # Take the first imported identity; the signing P12 must contain only one identity.
           IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) .*/\1/p' | head -1)"
