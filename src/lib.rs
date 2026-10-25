@@ -1,10 +1,10 @@
-//! FreeLingo 0.6.15 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.16 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -21,11 +21,31 @@ struct Backend {
     child: Child,
     port: u16,
     token: String,
+    flash_mode: u8,
 }
 static BACKEND: OnceLock<Mutex<Option<Backend>>> = OnceLock::new();
 static TRACE_HASHER: OnceLock<RandomState> = OnceLock::new();
 static TRACE_SESSION: OnceLock<String> = OnceLock::new();
 static TRACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+// 0 = llama.cpp default (auto), 1 = force on, 2 = force off.
+// Atomic avoids cross-thread environment changes while UI/inference is running.
+static FLASH_ATTENTION_MODE: AtomicU8 = AtomicU8::new(0);
+
+fn effective_flash_mode(model: &Path) -> u8 {
+    if translate_gemma_12b_model(model) {
+        FLASH_ATTENTION_MODE.load(Ordering::Relaxed).min(2)
+    } else { 0 }
+}
+fn flash_mode_name(mode: u8) -> &'static str {
+    match mode { 1 => "on", 2 => "off", _ => "auto" }
+}
+
+/// Set Flash Attention for the next 12B request; live requests finish unchanged.
+/// Invalid arguments fall back to auto, rather than aborting the application.
+#[no_mangle]
+pub extern "C" fn fl_set_flash_attention(mode: c_int) {
+    FLASH_ATTENTION_MODE.store(if (0..=2).contains(&mode) { mode as u8 } else { 0 }, Ordering::Relaxed);
+}
 fn backend() -> &'static Mutex<Option<Backend>> {
     BACKEND.get_or_init(|| Mutex::new(None))
 }
@@ -226,7 +246,7 @@ fn curl_stream_request(session: &Backend, payload: &Value,
     Ok((answer, truncated, timings, first_token_ms.unwrap_or(0)))
 }
 
-fn start_server(model: &Path) -> Result<Backend, String> {
+fn start_server(model: &Path, flash_mode: u8) -> Result<Backend, String> {
     if !model.is_file() || model.extension().and_then(|s| s.to_str()) != Some("gguf") {
         return Err("Модель не скачана. Открой «Модели» и установи GGUF-модель.".into());
     }
@@ -241,6 +261,11 @@ fn start_server(model: &Path) -> Result<Backend, String> {
     cmd.arg("--model").arg(model)
         .args(["--host", "127.0.0.1", "--port", &port.to_string(),
                "--ctx-size", "6144", "--n-gpu-layers", "99", "--jinja", "--no-webui", "--alias", "freelingo", "--api-key", &token]);
+    // With auto we pass no flag, preserving the exact behaviour of 0.6.15.
+    // Only the experimental 12B profile can override llama.cpp attention.
+    if translate_gemma_12b_model(model) && flash_mode != 0 {
+        cmd.args(["--flash-attn", flash_mode_name(flash_mode)]);
+    }
     cmd.stdin(Stdio::null()).stdout(Stdio::null());
     if let Some(f) = log { cmd.stderr(Stdio::from(f)); } else { cmd.stderr(Stdio::null()); }
     let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить llama.cpp: {e}"))?;
@@ -252,7 +277,7 @@ fn start_server(model: &Path) -> Result<Backend, String> {
         }
         if let Ok(response) = curl_request(&health, &token, None, "2") {
             if response.get("status").and_then(Value::as_str) == Some("ok") {
-                return Ok(Backend { model: model.to_owned(), child, port, token });
+                return Ok(Backend { model: model.to_owned(), child, port, token, flash_mode });
             }
         }
         thread::sleep(Duration::from_millis(400));
@@ -697,17 +722,35 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
     trace.log(&path, "request", &format!("pair={} source_lang={} target_lang={} operation={}",
         pair, trace_language(source_language), trace_language(translation_target(target)), mode));
     let mut guard = backend().lock().map_err(|_| "Внутренняя ошибка движка".to_string())?;
+    let requested_flash = effective_flash_mode(&path);
     let restart = match guard.as_mut() {
         None => true,
-        Some(previous) => previous.model != path || !matches!(previous.child.try_wait(), Ok(None)),
+        Some(previous) => previous.model != path || previous.flash_mode != requested_flash
+            || !matches!(previous.child.try_wait(), Ok(None)),
     };
     if restart {
         if let Some(mut old) = guard.take() { let _ = old.child.kill(); let _ = old.child.wait(); }
         let boot_started = Instant::now();
-        *guard = Some(start_server(&path)?);
-        trace.log(&path, "backend", &format!("started=1 startup_ms={} metal_layers=99 ctx=6144", boot_started.elapsed().as_millis()));
+        // If a pinned llama.cpp build or Metal device rejects the new profile,
+        // recover automatically with the last known-good default configuration.
+        // Never hide the fallback from the private diagnostics.
+        let (new_backend, actual_flash) = match start_server(&path, requested_flash) {
+            Ok(server) => (server, requested_flash),
+            Err(reason) if requested_flash != 0 => {
+                trace.log(&path, "flash_fallback", &format!(
+                    "requested={} reason=server_start_failed", flash_mode_name(requested_flash)));
+                eprintln!("FreeLingo: experimental attention mode failed: {}", reason);
+                (start_server(&path, 0)?, 0)
+            }
+            Err(reason) => return Err(reason),
+        };
+        *guard = Some(new_backend);
+        trace.log(&path, "backend", &format!(
+            "started=1 startup_ms={} metal_layers=99 ctx=6144 flash_attn={} requested_flash_attn={}",
+            boot_started.elapsed().as_millis(), flash_mode_name(actual_flash), flash_mode_name(requested_flash)));
     } else {
-        trace.log(&path, "backend", "started=0 reused=1");
+        trace.log(&path, "backend", &format!(
+            "started=0 reused=1 flash_attn={}", flash_mode_name(requested_flash)));
     }
     let session = guard.as_ref().ok_or("Движок не запущен")?;
     // Same canonical source handling for the main editor, popup (Cmd+4) and A/B.
@@ -773,7 +816,7 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
         if let Some(mut previous) = guard.take() {
             let _ = previous.child.kill(); let _ = previous.child.wait();
         }
-        *guard = Some(start_server(&editor_path)?);
+        *guard = Some(start_server(&editor_path, 0)?);
         let editor = guard.as_ref().ok_or("Редактор не запущен")?;
         let polished = polish_document(editor, source, &output, trace);
         trace.log(&path, "final", &format!("status=success result_hash={} result_chars={}",
@@ -1052,6 +1095,21 @@ mod tests {
     #[test] fn quality_does_not_reject_rewrite() {
         assert_eq!(quality_issue("Улучшить русский текст", "Прекрасный текст.", "ru"), None);
     }
+    #[test]
+    fn flash_attention_mode_is_only_for_translate_gemma_12b() {
+        let model12 = Path::new("/tmp/translategemma-12b-it-Q4_K_M.gguf");
+        let model4 = Path::new("/tmp/translategemma-4b_Q4_K_M.gguf");
+        fl_set_flash_attention(1);
+        assert_eq!(effective_flash_mode(model12), 1);
+        assert_eq!(effective_flash_mode(model4), 0);
+        assert_eq!(flash_mode_name(1), "on");
+        fl_set_flash_attention(2);
+        assert_eq!(effective_flash_mode(model12), 2);
+        assert_eq!(flash_mode_name(2), "off");
+        fl_set_flash_attention(9);
+        assert_eq!(effective_flash_mode(model12), 0);
+    }
+
     #[test] fn enforce_plural_and_idiomatic_prompt() {
         let p = system_prompt("ru", "translate");
         assert!(p.contains("plural"));

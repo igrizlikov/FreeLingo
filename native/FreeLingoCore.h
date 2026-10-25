@@ -15,6 +15,8 @@ void fl_work_async_diagnostic(const char *text, const char *target, const char *
                               const char *model, const char *origin, const char *source_language,
                               fl_completion done, void *context);
 void fl_free_string(char *result);
+// 0 = automatic, 1 = Flash Attention forced on, 2 = forced off. 12B only.
+void fl_set_flash_attention(int mode);
 void fl_shutdown(void);
 #ifdef __cplusplus
 }

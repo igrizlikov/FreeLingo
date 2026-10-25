@@ -258,6 +258,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSButton *_settingsLoginCheckbox;
     NSButton *_settingsNaturalCheckbox;
     NSButton *_settingsLiteraryCheckbox;
+    NSPopUpButton *_settingsFlashPicker;
     NSPopUpButton *_settingsShortcut0;
     NSPopUpButton *_settingsShortcut1;
     NSPopUpButton *_settingsShortcut2;
@@ -288,8 +289,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _sessionHistory = [NSMutableArray new];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         @"modelID": @"translategemma-4b", @"languageIndex": @0,
-        @"showDockIcon": @NO, @"naturalRussianTranslation": @YES, @"literaryRussianReview": @NO
+        @"showDockIcon": @NO, @"naturalRussianTranslation": @YES, @"literaryRussianReview": @NO,
+        @"flashAttentionMode": @0
     }];
+    fl_set_flash_attention((int)[NSUserDefaults.standardUserDefaults integerForKey:@"flashAttentionMode"]);
     [self createApplicationMenu];
     [self createMainWindow];
     [self createQuickPanel];
@@ -1327,6 +1330,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
     }
 }
 
+- (void)settingsFlashChanged:(NSPopUpButton *)sender {
+    NSInteger mode = MAX(0, MIN(sender.indexOfSelectedItem, 2));
+    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:@"flashAttentionMode"];
+    fl_set_flash_attention((int)mode);
+    // Rust switches the local server on the next request under its own lock.
+    // Do not terminate an in-flight translation on this UI event.
+}
+
 - (void)settingsShortcutChanged:(NSPopUpButton *)sender {
     if (sender.tag < 0 || sender.tag > 2) return;
     [NSUserDefaults.standardUserDefaults setInteger:sender.indexOfSelectedItem
@@ -1387,6 +1398,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [self settingsHeading:@"Перевод" subtitle:@"Качество русского и диагностика локальных моделей" onView:root];
     _settingsNaturalCheckbox = [self settingsCheckbox:@"Естественный русский перевод" tag:3 y:282 onView:root];
     _settingsLiteraryCheckbox = [self settingsCheckbox:@"Литературная вычитка русского (медленнее)" tag:4 y:242 onView:root];
+    NSTextField *flashTitle = FLLabel(@"Flash Attention (TranslateGemma 12B)", 13);
+    flashTitle.frame = NSMakeRect(24, 200, 293, 27);
+    [root addSubview:flashTitle];
+    _settingsFlashPicker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(320, 197, 322, 30) pullsDown:NO];
+    [_settingsFlashPicker addItemsWithTitles:@[@"Авто (как в 0.6.15)", @"Вкл. (эксперимент)", @"Выкл. (для сравнения)"]];
+    _settingsFlashPicker.target = self;
+    _settingsFlashPicker.action = @selector(settingsFlashChanged:);
+    [root addSubview:_settingsFlashPicker];
     [self settingsAction:@"Сравнить Hy-MT2 и TranslateGemma / 4B и 12B…" selector:@selector(compareTranslations:)
                    frame:NSMakeRect(24, 158, 298, 34) onView:root];
     [self settingsAction:@"Открыть журнал перевода…" selector:@selector(openTranslationDiagnostics:)
@@ -1451,6 +1470,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _settingsLoginCheckbox.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsNaturalCheckbox.state = [defaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsLiteraryCheckbox.state = [defaults boolForKey:@"literaryRussianReview"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [_settingsFlashPicker selectItemAtIndex:MAX(0, MIN([defaults integerForKey:@"flashAttentionMode"], 2))];
     NSArray<NSPopUpButton *> *shortcuts = @[_settingsShortcut0, _settingsShortcut1, _settingsShortcut2];
     for (unsigned i = 0; i < 3; ++i) {
         NSInteger choice = [defaults integerForKey:FLShortcutSetting(i)];

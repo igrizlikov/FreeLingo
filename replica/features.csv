@@ -35,3 +35,5 @@ source_language_override,"Выбор исходного языка для кор
 F32,TranslateGemma 12B fewer inference requests and timings,Rust inference,must,untested,0.6.14 code and Rust unit tests; CPU available only on CI,Measure speed and translation coherence for 3000-8000 character originals on real Mac
 
 F33,TranslateGemma 12B streaming display,Rust/AppKit,should,untested,0.6.15 source SSE parser and callback source only,Requires macOS CI compile and UI testing incl clear/replace/error cases
+
+F34,Flash Attention A/B profile for TranslateGemma 12B,Rust/AppKit,should,untested,0.6.16 source and static checks,Requires macOS CI build and same-input tokens-per-second benchmark in auto/on/off modes

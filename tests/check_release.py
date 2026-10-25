@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.15'
-assert int(plist['CFBundleVersion']) == 25
+assert plist['CFBundleShortVersionString'] == '0.6.16'
+assert int(plist['CFBundleVersion']) == 26
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -195,3 +195,9 @@ assert '[activeModelID hasPrefix:@"translategemma-"]' in main
 assert '[FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"]' not in main
 assert '_comparisonSourceCode = FLResolvedSourceLanguage(text, _mainSourceLanguage)' in main
 print('OK: v0.6.13 explicit source language in main and popup, both Gemma sizes')
+
+# v0.6.16: testable TranslateGemma 12B Flash Attention profiles with fallback.
+subprocess.run(['python3', str(root / 'tests' / 'test_0614_speed.py')], check=True)
+subprocess.run(['python3', str(root / 'tests' / 'test_0615_streaming.py')], check=True)
+subprocess.run(['python3', str(root / 'tests' / 'test_0616_flash_attention.py')], check=True)
+print('OK: v0.6.16 opt-in Flash Attention A/B, streaming and inference-layout regression guards')
