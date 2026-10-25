@@ -48,3 +48,7 @@
 - OBSERVED: Qwen postediting sometimes replaced «пожилая» with «старая».
 - SOURCE_CONFIRMED: earlier 0.6.6 postedit silently returned original on rejection; diagnostics now distinguish decisions.
 - UNTESTED: 0.6.7 A/B test between Hy-MT2 7B and TranslateGemma 4B has not run on real hardware.
+
+## 2026-10-25 — 0.6.8: конфликт контекста перевода и вероятный UI-crash
+- FL-QUALITY-009 (OBSERVED): пользователь показал лучший перевод Gemma через ⌘4, чем из главного окна на одном рассказе. SOURCE_CONFIRMED: Rust разрезал **каждую** строку независимо. 0.6.9: специализированные модели для текстов до 3000 символов получают один запрос с полным контекстом. UNTESTED E2E.
+- FL-APPKIT-010 (OBSERVED): после перевода, при открытии настроек FreeLingo иногда закрывается. CRASH CAUSE UNKNOWN: нет .ips, не утверждать что это NSWindow use-after-free. 0.6.9 делает releasedWhenClosed=NO для сохраняемых NSWindow и NSPanel, добавляет приватные NSLog метки. Требуется повторить сценарий на macOS и разобрать crash-report, если воспроизведётся.

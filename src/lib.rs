@@ -417,6 +417,17 @@ fn polish_document(session: &Backend, original: &str, translation: &str) -> Stri
         }).collect::<Vec<_>>().join("\n")
 }
 
+// Short stories need shared document context for kinship and idioms. Keep
+// larger inputs chunked to stay within llama.cpp context limits; CJK token
+// density is much higher than a Latin-alphabet character count suggests.
+fn whole_document_mode(source: &str, operation: &str, model: &Path) -> bool {
+    if !operation.starts_with("translate") || !(translate_gemma_model(model) || hy_mt2_model(model)) {
+        return false;
+    }
+    let length = source.chars().count();
+    length <= 3000 && (!has_cjk(source) || length <= 1300)
+}
+
 fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Result<String, String> {
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
@@ -453,8 +464,22 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
         *guard = Some(start_server(&path)?);
     }
     let session = guard.as_ref().ok_or("Движок не запущен")?;
+    // Same canonical source handling for the main editor, popup (Cmd+4) and A/B.
+    // Preserve paragraph breaks; normalize CRLF from browsers and text editors.
+    let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized_source = normalized_source.trim();
+    let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
+    let short_specialized_document = whole_document_mode(normalized_source, operation, &path);
     let mut output = String::new();
-    for line in source.split_inclusive('\n') {
+    if short_specialized_document {
+        translation_diagnostic(&path, "layout", "единый_контекст");
+        // Whole-document context is essential to resolve kinship, chronology,
+        // pronouns and idioms in a short story. This also eliminates separate
+        // model invocations caused by hard line breaks in the source editor.
+        output = request_chunk(session, normalized_source, target, translate_mode)?;
+    } else {
+        translation_diagnostic(&path, "layout", "по_фрагментам");
+        for line in normalized_source.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
         let separator = if line.ends_with('\n') { "\n" } else { "" };
         // Blank lines remain blank. Each translated unit is within the context limit.
@@ -462,11 +487,11 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
             let parts = split_long_line(body, 1100);
             for (index, part) in parts.iter().enumerate() {
                 if index > 0 { output.push(' '); }
-                let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
                 output.push_str(&request_chunk(session, part, target, translate_mode)?);
             }
         }
         output.push_str(separator);
+        }
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
     translation_diagnostic(&path, "translation", "результат_получен");
@@ -518,6 +543,19 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn whole_document_context_for_short_specialized_texts() {
+        let gemma = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
+        let hy = Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf");
+        let qwen = Path::new("/Models/Qwen3-4B-Q4_K_M.gguf");
+        let family = "My Wonderful Family\nI have two brothers and one sister.\n\nWe love walking together.";
+        assert!(whole_document_mode(family, "translate", gemma));
+        assert!(whole_document_mode(family, "translate_natural", hy));
+        assert!(!whole_document_mode(family, "rewrite", gemma));
+        assert!(!whole_document_mode(family, "translate", qwen));
+        assert!(!whole_document_mode(&"a".repeat(3001), "translate", gemma));
+        assert!(whole_document_mode("你好。天气很好。", "translate", gemma));
+        assert!(!whole_document_mode(&"中".repeat(1301), "translate", gemma));
+    }
     #[test] fn gemma_requires_direction_and_uses_template_kwargs() {
         let model = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
         assert!(translate_gemma_model(model));

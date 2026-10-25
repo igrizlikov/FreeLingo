@@ -23,3 +23,5 @@ F21,Local side by side translation comparison,AppKit,must,untested,0.6.7 UI sour
 F22,Privacy-safe postediting diagnostic status,Rust/AppKit,must,untested,0.6.7 source only,Requires checked journal status in real app
 F23,Multilingual A/B corpus (5 languages),Tests,should,partial,14 human-judged cases,Mac performance and fluency untested
 F24,Compact menu-bar menu and AppKit settings sections,AppKit,should,untested,static tests only,macOS UI QA and signed release pending
+F25,Consistent short-text translation via main UI and hotkey,Rust/AppKit,must,untested,0.6.9 whole-document inference,Requires real Mac A/B same source test
+F26,Settings window stability after inference,AppKit,must,untested,0.6.9 window lifetime guards,Requires .ips triage and stress testing on macOS

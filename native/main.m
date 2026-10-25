@@ -203,7 +203,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     (void)note;
     _sessionHistory = [NSMutableArray new];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        @"modelID": @"qwen3-4b", @"languageIndex": @0,
+        @"modelID": @"translategemma-4b", @"languageIndex": @0,
         @"showDockIcon": @NO, @"naturalRussianTranslation": @YES, @"literaryRussianReview": @NO
     }];
     [self createApplicationMenu];
@@ -271,6 +271,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable |
                    NSWindowStyleMaskMiniaturizable)
         backing:NSBackingStoreBuffered defer:NO];
+    _mainWindow.releasedWhenClosed = NO;
     _mainWindow.title = @"FreeLingo";
     _mainWindow.minSize = NSMakeSize(700, 440);
     _mainWindow.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
@@ -343,6 +344,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _quickPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 540, 370)
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow)
         backing:NSBackingStoreBuffered defer:NO];
+    _quickPanel.releasedWhenClosed = NO;
     _quickPanel.title = @"FreeLingo — быстрый перевод";
     _quickPanel.floatingPanel = YES;
     _quickPanel.hidesOnDeactivate = NO;
@@ -451,10 +453,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _comparisonStart = [NSDate date];
     FLJob *job = [FLJob new];
     job.controller = self;
-    job.source = _comparisonSource;
-    job.mode = @"translate";
+    job.source = [_comparisonSource copy];
+    BOOL natural = [_comparisonTarget isEqualToString:@"ru"] &&
+        [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"];
+    NSString *effectiveMode = natural ? @"translate_natural" : @"translate";
+    job.mode = effectiveMode;
     job.comparisonStage = stage;
-    fl_work_async(_comparisonSource.UTF8String, direction.UTF8String, @"translate".UTF8String,
+    fl_work_async(_comparisonSource.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
         FLModelURL(idx).path.UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
@@ -487,6 +492,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         _comparisonWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 760, 570)
             styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable)
             backing:NSBackingStoreBuffered defer:NO];
+        _comparisonWindow.releasedWhenClosed = NO;
         _comparisonWindow.title = @"FreeLingo — сравнение переводчиков";
         [_comparisonWindow center];
         NSScrollView *scroll = FLEditor(&_comparisonResult, NO);
@@ -683,8 +689,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *model = FLModelURL(modelIndex).path;
     FLJob *job = [FLJob new];
     job.controller = self;
-    job.source = text;
-    job.mode = mode;
+    job.source = [text copy];
+    job.mode = [mode copy];
     job.quick = quick;
     job.generation = quick ? ++_quickGeneration : 0;
     if (quick) { _quickEditButton.enabled = NO; _quickEditor.string = @"Обрабатываю локальной моделью…"; }
@@ -718,6 +724,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
 }
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
+    // Record lifecycle only; never log the user's source or translated text.
+    NSLog(@"FreeLingo.UI translationFinished model_job=%@ success=%d quick=%d", job.comparisonStage > 0 ? @"comparison" : @"regular", ok, job.quick);
     if (job.comparisonStage > 0) {
         if (!_comparisonRunning) return;
         NSTimeInterval elapsed = -[_comparisonStart timeIntervalSinceNow];
@@ -1140,7 +1148,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
                    frame:NSMakeRect(24, 158, 298, 34) onView:root];
     [self settingsAction:@"Открыть журнал перевода…" selector:@selector(openTranslationDiagnostics:)
                    frame:NSMakeRect(336, 158, 282, 34) onView:root];
-    NSTextField *info = FLLabel(@"Вычитка экспериментальная: результат может остаться без изменений или ухудшиться.", 12);
+    NSTextField *info = FLLabel(@"Для русского рекомендуем TranslateGemma 4B. Выбор модели — в разделе «Основные». Вычитка Qwen экспериментальная.", 12);
     info.frame = NSMakeRect(24, 103, 637, 32);
     [root addSubview:info];
     return root;
@@ -1209,6 +1217,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 - (void)showSettings:(id)sender {
     (void)sender;
+    // AppKit window creation and control updates must be on the main thread.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self showSettings:nil]; });
+        return;
+    }
+    NSLog(@"FreeLingo.UI settings_open:begin");
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (front && front.processIdentifier != NSProcessInfo.processInfo.processIdentifier)
         _settingsPreviousApp = front;
@@ -1216,6 +1230,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 730, 506)
             styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable)
             backing:NSBackingStoreBuffered defer:NO];
+        _settingsWindow.releasedWhenClosed = NO;
         _settingsWindow.title = @"FreeLingo — Настройки";
         [_settingsWindow center];
         NSView *root = _settingsWindow.contentView;
@@ -1235,6 +1250,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [self syncSettingsControls];
     [_settingsWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    NSLog(@"FreeLingo.UI settings_open:complete");
 }
 
 - (void)presentMessage:(NSString *)message {

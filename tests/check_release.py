@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.8'
-assert int(plist['CFBundleVersion']) == 18
+assert plist['CFBundleShortVersionString'] == '0.6.9'
+assert int(plist['CFBundleVersion']) == 19
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -135,3 +135,16 @@ assert 'settingsShortcutsTab' in main and 'settingsActionsTab' in main
 assert 'settingsCheckboxChanged:' in main and 'settingsShortcutChanged:' in main
 assert 'registerGlobalHotkeys];' in main and 'checkForUpdates:' in main and 'compareTranslations:' in main
 print('OK: compact status menu, functional native settings tabs and preserved actions')
+
+# v0.6.9: same whole-document translation engine for short texts, prevent window
+# lifetime use-after-close; retain user-selected translator across Sparkle updates.
+assert 'length <= 3000 && (!has_cjk(source) || length <= 1300)' in core
+assert 'short_specialized_document' in core and '"единый_контекст"' in core
+assert '_mainWindow.releasedWhenClosed = NO' in main
+assert '_settingsWindow.releasedWhenClosed = NO' in main
+assert '_quickPanel.releasedWhenClosed = NO' in main
+assert '_comparisonWindow.releasedWhenClosed = NO' in main
+assert '@"modelID": @"translategemma-4b"' in main
+assert 'NSString *effectiveMode = natural ? @"translate_natural" : @"translate";' in main
+assert 'FreeLingo.UI settings_open:begin' in main
+print('OK: v0.6.9 context consistency, explicit window retention and UI lifecycle markers')

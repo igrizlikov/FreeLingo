@@ -24,7 +24,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *FLModels(void) {
            @"file": @"Hy-MT2-7B-Q4_K_M.gguf", @"size": @"4,62 ГБ", @"minBytes": @"4200000000",
            @"url": @"https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/main/Hy-MT2-7B-Q4_K_M.gguf",
            @"sha256": @"9f96256500f3fc1ab4d64336b58f52a949a95ad7516b0c229476eef782f9f77b" },
-        @{ @"id": @"translategemma-4b", @"name": @"TranslateGemma 4B · сравнение качества · 2,49 ГБ",
+        @{ @"id": @"translategemma-4b", @"name": @"TranslateGemma 4B · рекомендуем для русского · 2,49 ГБ",
            @"file": @"translategemma-4b_Q4_K_M.gguf", @"size": @"2,49 ГБ", @"minBytes": @"2200000000",
            @"url": @"https://huggingface.co/SandLogicTechnologies/translategemma-4b-it-GGUF/resolve/main/translategemma-4b_Q4_K_M.gguf",
            @"sha256": @"526747309109c016db547c6fc1c7b0c9c286b5e7a7556827b5419fd9543a09cd" },
@@ -71,7 +71,10 @@ static NSInteger FLActiveModelIndex(void) {
     for (NSInteger i = 0; i < (NSInteger)FLModels().count; i++) {
         if ([FLModels()[(NSUInteger)i][@"id"] isEqualToString:id]) return i;
     }
-    return 1;
+    for (NSInteger i = 0; i < (NSInteger)FLModels().count; ++i) {
+        if ([FLModels()[(NSUInteger)i][@"id"] isEqualToString:@"translategemma-4b"]) return i;
+    }
+    return 0;
 }
 static NSString *FLHashFile(NSURL *url) {
     NSInputStream *input = [NSInputStream inputStreamWithURL:url];
