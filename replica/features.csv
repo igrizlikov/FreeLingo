@@ -27,4 +27,6 @@ F25,Consistent short-text translation via main UI and hotkey,Rust/AppKit,must,un
 F26,Settings window stability after inference,AppKit,must,untested,0.6.9 window lifetime guards,Requires .ips triage and stress testing on macOS
 F27,Plain text paste in main editor,AppKit,should,untested,0.6.10 FLPlainTextView enforced plain text,macOS paste from Safari/Pages required
 F28,One-click clear source and result,AppKit,should,untested,0.6.10 clearMain and generation guard,macOS button and in-flight cancellation check required
-F29,Correlated privacy-safe main hotkey AB diagnostics,Rust/AppKit,must,untested,0.6.11 trace source and static tests,Needs macOS CI and same-input human comparison without app restart
+F29,Correlated private translation diagnostics,Rust/AppKit,must,untested,0.6.11 origin and keyed hash logging source only,Needs macOS CI build and same-text main-vs-hotkey log check
+F30,Paragraph-preserving hotkey capture,Accessibility,must,untested,0.6.12 clipboard fallback and source equivalence checks,macOS browsers TextEdit and pasteboard restoration require E2E
+F31,TranslateGemma 12B model selection and A-B,Models,must,untested,Official GGUF 12B SHA and 0.6.12 source,macOS llama engine validation and quality A-B required

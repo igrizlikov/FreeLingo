@@ -10,11 +10,11 @@ main = (root / 'native' / 'main.m').read_text()
 ui = (root / 'native' / 'ModelWindow.inc').read_text()
 core = (root / 'src' / 'lib.rs').read_text()
 
-assert model.count('"sha256"') == 7, 'wrong number of model entries'
+assert model.count('"sha256"') == 8, 'wrong number of model entries'
 sha = re.findall(r'@"sha256": @"([a-f0-9]{64})"', model)
 urls = re.findall(r'@"url": @"(https://huggingface\.co/[^\"]+)"', model)
-assert len(sha) == len(urls) == model.count('@"minBytes":') == 7
-assert len(set(sha)) == 7
+assert len(sha) == len(urls) == model.count('@"minBytes":') == 8
+assert len(set(sha)) == 8
 for part in ('qwen3-0.6b', 'qwen3-1.7b', 'qwen3-4b', 'qwen3-8b', 'hy-mt2-7b', 'hy-mt2-1.8b'):
     assert part in model
 assert 'CC_SHA256_Update' in model
@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.11'
-assert int(plist['CFBundleVersion']) == 21
+assert plist['CFBundleShortVersionString'] == '0.6.12'
+assert int(plist['CFBundleVersion']) == 22
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -139,7 +139,7 @@ print('OK: compact status menu, functional native settings tabs and preserved ac
 # v0.6.9: same whole-document translation engine for short texts, prevent window
 # lifetime use-after-close; retain user-selected translator across Sparkle updates.
 assert 'length <= 3000 && (!has_cjk(source) || length <= 1300)' in core
-assert 'short_specialized_document' in core and '"единый_контекст"' in core
+assert 'short_specialized_document' in core and '"whole"' in core and '"chunked"' in core
 assert '_mainWindow.releasedWhenClosed = NO' in main
 assert '_settingsWindow.releasedWhenClosed = NO' in main
 assert '_quickPanel.releasedWhenClosed = NO' in main
@@ -160,16 +160,27 @@ assert 'job.generation = quick ? ++_quickGeneration : ++_mainGeneration;' in mai
 assert '++_mainGeneration; // Ignore results' in main
 print('OK: v0.6.10 plain-text editors, one-click clear and stale-result guard')
 
-# v0.6.11: privacy-safe trace linked from AppKit origins to Rust inference.
-assert 'FLPrivateInputFingerprint(' in main and 'CCHmac(kCCHmacAlgSHA256' in main
-assert 'SecRandomCopyBytes(kSecRandomDefault' in main
-assert 'FLCanonicalTranslationSource(' in main
-for origin in ('@"main"', '@"hotkey"', '@"clipboard"', '@"ocr"', '@"ab-hy"', '@"ab-gemma"'):
-    assert origin in main, f'missing trace origin {origin}'
-assert main.count('fl_work_async_traced(') == 2
-assert 'fl_work_async_traced' in (root/'native/FreeLingoCore.h').read_text()
-assert 'TraceContext::from_json' in core and 'request_chunk_count(' in core
-assert 'trace_event(&path, trace, "layout"' in core
-assert '"{seconds} v2 id={} origin={} model={} hash={} detected={} target={} event={} detail={}"' in core
-assert 'if (!keyAvailable)' in main # privacy failure never falls back to unsalted hash
-print('OK: v0.6.11 correlated per-session HMAC diagnostics without text content')
+# 0.6.11: private request correlation across main/hotkey/A-B.
+assert 'void fl_work_async_diagnostic(' in (root/'native/FreeLingoCore.h').read_text()
+assert main.count('fl_work_async_diagnostic(') == 2
+assert 'origin:@"hotkey"' in main and 'origin:@"ocr"' in main and 'origin:@"clipboard"' in main
+assert '"ab",' in main and 'FLSourceLanguage(_comparisonSource)' in main
+for field in ('request_id=', 'origin=', 'source_hash=', 'raw_hash=', 'pair=', 'source_lang=', 'target_lang=', 'operation=', 'chunks=', 'temperature=', 'top_p=', 'top_k=', 'repeat_penalty=', 'max_tokens=', 'result_hash='):
+    assert field in core, field
+assert 'TRACE_HASHER.get_or_init(RandomState::new)' in core
+assert 'origin.UTF8String' in main
+print('OK: v0.6.11 keyed session fingerprints, provenance, parameter and layout tracing')
+
+# v0.6.12: preserve paragraphs from third-party selections and 12B A/B.
+assert 'FLWithoutWhitespace' in main and 'FLPasteboardSnapshot' in main
+assert 'FLSendCopyShortcut' in main and 'captureParagraphsAndTranslate:' in main
+assert 'hotkey_clipboard' in main and 'hotkey_clipboard' in core
+assert 'sameContent && pb.changeCount == afterCopyChangeCount' in main
+assert 'FLWithoutWhitespace(_originSelection)' in main
+assert 'content_hash=' in core
+assert 'translategemma-12b-it-Q4_K_M.gguf' in model
+assert '9196d728812afbf5efc10b539298585725edc3a4ecc092c22fdde5bbaf41879e' in model
+assert '_comparisonModels' in main and '@"translategemma-12b"' in main
+assert 'if (![downloadedID isEqualToString:@"translategemma-12b"])' in ui
+assert 'trace_session()' in core
+print('OK: v0.6.12 paragraph-preserving clipboard probe, safe replacement, content hash, TranslateGemma 12B')

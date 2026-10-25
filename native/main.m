@@ -6,8 +6,6 @@
 #import <Vision/Vision.h>
 #import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
-#import <CommonCrypto/CommonHMAC.h>
-#import <Security/Security.h>
 #import <Sparkle/Sparkle.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <NaturalLanguage/NaturalLanguage.h>
@@ -60,47 +58,53 @@ static NSString *FLSourceLanguage(NSString *text) {
     return [supported containsObject:code] ? code : nil;
 }
 
-// One-session HMAC key: comparable input fingerprints without disclosing user
-// text or letting someone dictionary-attack unsalted hashes of short phrases.
-// Fingerprints deliberately change when FreeLingo restarts.
-static NSString *FLCanonicalTranslationSource(NSString *source) {
-    if (!source) return @"";
-    NSString *unixLines = [[source stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
-        stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
-    return [unixLines stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-}
-static NSString *FLPrivateInputFingerprint(NSString *canonical) {
-    static uint8_t key[32];
-    static BOOL keyAvailable = NO;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        keyAvailable = SecRandomCopyBytes(kSecRandomDefault, sizeof(key), key) == errSecSuccess;
-    });
-    if (!keyAvailable) return @"unavailable"; // Never fall back to a public hash.
-    NSData *data = [canonical dataUsingEncoding:NSUTF8StringEncoding];
-    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
-    CCHmac(kCCHmacAlgSHA256, key, sizeof(key), data.bytes, data.length, digest);
-    NSMutableString *result = [NSMutableString stringWithCapacity:32];
-    for (NSUInteger i = 0; i < 16; i++) [result appendFormat:@"%02x", digest[i]];
-    return result;
-}
-static NSString *FLTraceEnvelope(NSString *canonical, NSString *origin, NSString *sourceLang, NSString *targetLang) {
-    NSDictionary *record = @{
-        @"id": NSUUID.UUID.UUIDString,
-        @"origin": origin ?: @"unknown",
-        @"source_hash": FLPrivateInputFingerprint(canonical),
-        @"source_lang": sourceLang ?: @"unknown",
-        @"target_lang": targetLang ?: @"unknown"
-    };
-    NSData *json = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
-    return json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"{}";
-}
-
 static NSInteger FLModelIndexForID(NSString *modelID) {
     for (NSUInteger index = 0; index < FLModels().count; index++) {
         if ([FLModels()[index][@"id"] isEqualToString:modelID]) return (NSInteger)index;
     }
     return -1;
+}
+
+// This comparison is only used to verify that a clipboard copy represents
+// the SAME selected text. Never translate clipboard content that fails it.
+static NSString *FLWithoutWhitespace(NSString *text) {
+    if (!text) return @"";
+    NSArray<NSString *> *components = [text componentsSeparatedByCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [components componentsJoinedByString:@""];
+}
+
+// Copy the existing pasteboard representations so a temporary read of a
+// browser selection does not destroy the user's clipboard contents.
+static NSArray<NSPasteboardItem *> *FLPasteboardSnapshot(NSPasteboard *pb) {
+    NSMutableArray<NSPasteboardItem *> *backup = [NSMutableArray new];
+    for (NSPasteboardItem *original in pb.pasteboardItems) {
+        NSPasteboardItem *saved = [NSPasteboardItem new];
+        for (NSPasteboardType type in original.types) {
+            NSData *data = [original dataForType:type];
+            if (data) [saved setData:data forType:type];
+        }
+        [backup addObject:saved];
+    }
+    return backup;
+}
+
+static BOOL FLSendCopyShortcut(void) {
+    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    if (!source) return NO;
+    CGEventRef down = CGEventCreateKeyboardEvent(source, (CGKeyCode)8, true);
+    CGEventRef up = CGEventCreateKeyboardEvent(source, (CGKeyCode)8, false);
+    BOOL good = (down != NULL && up != NULL);
+    if (good) {
+        CGEventSetFlags(down, kCGEventFlagMaskCommand);
+        CGEventSetFlags(up, kCGEventFlagMaskCommand);
+        CGEventPost(kCGHIDEventTap, down);
+        CGEventPost(kCGHIDEventTap, up);
+    }
+    if (down) CFRelease(down);
+    if (up) CFRelease(up);
+    CFRelease(source);
+    return good;
 }
 
 static NSButton *FLButton(NSString *title, id target, SEL action) {
@@ -209,6 +213,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *_currentQuickSource;
     NSString *_currentQuickResult;
     NSString *_currentQuickMode;
+    NSString *_quickOrigin;
     pid_t _originPID;
     AXUIElementRef _originElement;
     NSString *_originSelection;
@@ -216,7 +221,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     BOOL _quickEditTransitioning; // guards rapid/reentrant button activations
     NSUInteger _quickGeneration;
     NSUInteger _mainGeneration; // Prevent a cleared view from receiving a stale callback.
-    NSString *_quickOrigin; // hotkey/clipboard/ocr/settings, not user text
+    NSUInteger _selectionCaptureGeneration; // Supersede pending hotkey clipboard probes.
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *_sessionHistory;
     EventHotKeyRef _translateHotkey;
     EventHotKeyRef _rewriteHotkey;
@@ -247,6 +252,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSTextView *_comparisonResult;
     NSString *_comparisonSource;
     NSString *_comparisonTarget;
+    NSArray<NSString *> *_comparisonModels;
     BOOL _comparisonRunning;
     NSDate *_comparisonStart;
 }
@@ -486,12 +492,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
     if ([NSFileManager.defaultManager fileExistsAtPath:file.path])
         [NSWorkspace.sharedWorkspace openURL:file];
     else
-        [self presentMessage:@"Журнал появится после нового перевода. Содержимое текста не сохраняется. Отпечатки действуют до перезапуска FreeLingo."];
+        [self presentMessage:@"Журнал появится после нового перевода. Исходный текст в него не записывается."];
 }
 
 - (void)runComparisonStage:(NSInteger)stage {
     if (!_comparisonRunning || !_comparisonWindow) return;
-    NSString *modelID = stage == 1 ? @"hy-mt2-7b" : @"translategemma-4b";
+    NSString *modelID = _comparisonModels[(NSUInteger)(stage - 1)];
     NSInteger idx = FLModelIndexForID(modelID);
     if (idx < 0 || !FLModelInstalled(idx)) {
         _comparisonRunning = NO;
@@ -499,7 +505,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         return;
     }
     NSString *direction = _comparisonTarget;
-    if (stage == 2) {
+    if ([modelID hasPrefix:@"translategemma-"]) {
         NSString *detected = FLSourceLanguage(_comparisonSource);
         if (!detected || [detected isEqualToString:_comparisonTarget]) {
             _comparisonRunning = NO;
@@ -520,12 +526,9 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *effectiveMode = natural ? @"translate_natural" : @"translate";
     job.mode = effectiveMode;
     job.comparisonStage = stage;
-    NSString *input = FLCanonicalTranslationSource(_comparisonSource);
-    NSString *sourceLang = FLSourceLanguage(input);
-    NSString *trace = FLTraceEnvelope(input, stage == 1 ? @"ab-hy" : @"ab-gemma",
-                                       sourceLang, _comparisonTarget);
-    fl_work_async_traced(input.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
-        FLModelURL(idx).path.UTF8String, trace.UTF8String, FLRustCallback, (__bridge_retained void *)job);
+    fl_work_async_diagnostic(_comparisonSource.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
+        FLModelURL(idx).path.UTF8String, "ab",
+        (FLSourceLanguage(_comparisonSource) ?: @"unknown").UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)compareTranslations:(id)sender {
@@ -542,12 +545,30 @@ static void FLRustCallback(char *raw, int success, void *context) {
     }
     NSInteger hy = FLModelIndexForID(@"hy-mt2-7b");
     NSInteger gemma = FLModelIndexForID(@"translategemma-4b");
-    if (!FLModelInstalled(hy) || !FLModelInstalled(gemma)) {
+    NSInteger gemma12 = FLModelIndexForID(@"translategemma-12b");
+    BOOL canCompareSpecialists = FLModelInstalled(hy) && FLModelInstalled(gemma);
+    BOOL canCompareGemmas = FLModelInstalled(gemma) && FLModelInstalled(gemma12);
+    if (!canCompareSpecialists && !canCompareGemmas) {
         [self showModels:nil];
-        [self presentMessage:@"Для сравнения скачай обе модели: Hy-MT2 7B и TranslateGemma 4B."];
+        [self presentMessage:@"Для сравнения установи TranslateGemma 4B и вторую модель: TranslateGemma 12B или Hy-MT2 7B."];
         return;
     }
-    _comparisonSource = FLCanonicalTranslationSource(text);
+    BOOL compareGemmas = canCompareGemmas;
+    if (canCompareSpecialists && canCompareGemmas) {
+        NSAlert *choice = [NSAlert new];
+        choice.messageText = @"Выбери пару моделей";
+        choice.informativeText = @"Обе модели последовательно получат один и тот же оригинал.";
+        [choice addButtonWithTitle:@"Gemma 4B / 12B"];
+        [choice addButtonWithTitle:@"Hy-MT2 / Gemma 4B"];
+        [choice addButtonWithTitle:@"Отмена"];
+        NSModalResponse answer = [choice runModal];
+        if (answer == NSAlertThirdButtonReturn) return;
+        compareGemmas = answer == NSAlertFirstButtonReturn;
+    }
+    _comparisonModels = compareGemmas ?
+        @[@"translategemma-4b", @"translategemma-12b"] :
+        @[@"hy-mt2-7b", @"translategemma-4b"];
+    _comparisonSource = [text copy];
     _comparisonTarget = FLSelectedLanguage(_mainLanguage);
     if (![@[@"ru", @"en", @"zh", @"fr", @"it"] containsObject:_comparisonTarget]) {
         [self presentMessage:@"Сравнение доступно для русского, английского, китайского, французского и итальянского."];
@@ -705,6 +726,43 @@ static void FLRustCallback(char *raw, int success, void *context) {
     return value;
 }
 
+// Some browsers expose a flat kAXSelectedTextAttribute even when their
+// normal Copy command preserves paragraphs. For long single-line selections,
+// probe ⌘C while the SOURCE app is still in front. Only prefer the clipboard
+// if the non-whitespace text matches the trusted AX selection. No clipboard
+// text is logged, persisted or used if a different selection was copied.
+- (void)captureParagraphsAndTranslate:(NSString *)axText mode:(NSString *)mode {
+    NSUInteger generation = ++_selectionCaptureGeneration;
+    pid_t appPID = _originPID;
+    NSPasteboard *pb = NSPasteboard.generalPasteboard;
+    NSInteger initialChangeCount = pb.changeCount;
+    NSArray<NSPasteboardItem *> *backup = FLPasteboardSnapshot(pb);
+    if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != appPID || !FLSendCopyShortcut()) {
+        [self showQuickForText:axText mode:mode origin:@"hotkey"];
+        return;
+    }
+    // Do not activate FreeLingo until the source application handles ⌘C.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        NSInteger afterCopyChangeCount = pb.changeCount;
+        NSString *copied = afterCopyChangeCount != initialChangeCount ?
+            [pb stringForType:NSPasteboardTypeString] : nil;
+        BOOL sameContent = copied.length > 0 &&
+            [FLWithoutWhitespace(copied) isEqualToString:FLWithoutWhitespace(axText)];
+        // Never overwrite a new clipboard update from the user. Restore only
+        // if we can verify the clipboard holds the text copied by our request.
+        if (sameContent && pb.changeCount == afterCopyChangeCount) {
+            [pb clearContents];
+            if (backup.count) [pb writeObjects:backup];
+        }
+        if (generation != self->_selectionCaptureGeneration || self->_originPID != appPID) return;
+        BOOL restoredParagraphs = sameContent &&
+            [copied rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location != NSNotFound;
+        [self showQuickForText:(restoredParagraphs ? copied : axText) mode:mode
+                      origin:(restoredParagraphs ? @"hotkey_clipboard" : @"hotkey")];
+    });
+}
+
 - (void)translateSelectedTextWithMode:(NSString *)mode {
     if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @1})) {
         [self presentMessage:@"Для чтения выделенного текста разреши FreeLingo в настройках macOS → Конфиденциальность и безопасность → Универсальный доступ."];
@@ -715,7 +773,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [self presentMessage:@"Приложение не предоставило выделенный текст через Accessibility. Выдели текст в TextEdit или скопируй его и выбери «Перевести буфер обмена» в меню FreeLingo."];
         return;
     }
-    [self showQuickForText:source mode:mode origin:@"hotkey"];
+    if (source.length >= 220 &&
+        [source rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location == NSNotFound) {
+        [self captureParagraphsAndTranslate:source mode:mode];
+    } else {
+        ++_selectionCaptureGeneration;
+        [self showQuickForText:source mode:mode origin:@"hotkey"];
+    }
 }
 
 - (void)showQuickForText:(NSString *)source mode:(NSString *)mode origin:(NSString *)origin {
@@ -776,7 +840,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *targetArgument = language;
     if ([FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"] &&
         [effectiveMode hasPrefix:@"translate"]) {
-        NSString *detected = FLSourceLanguage(FLCanonicalTranslationSource(text));
+        NSString *detected = FLSourceLanguage(text);
         if (!detected || [detected isEqualToString:language]) {
             [self presentMessage:@"TranslateGemma: не удалось определить исходный язык или он совпадает с целевым. Попробуй более длинный текст на другом языке."];
             if (quick) _quickEditor.string = @"Не удалось определить исходный язык.";
@@ -785,12 +849,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
         }
         targetArgument = [NSString stringWithFormat:@"%@>%@", detected, language];
     }
-    NSString *input = FLCanonicalTranslationSource(text);
-    NSString *detectedLanguage = FLSourceLanguage(input);
     NSString *origin = quick ? (_quickOrigin ?: @"hotkey") : @"main";
-    NSString *trace = FLTraceEnvelope(input, origin, detectedLanguage, language);
-    fl_work_async_traced(input.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
-                        model.UTF8String, trace.UTF8String, FLRustCallback, (__bridge_retained void *)job);
+    NSString *sourceLanguage = FLSourceLanguage(text) ?: @"unknown";
+    fl_work_async_diagnostic(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
+        model.UTF8String, origin.UTF8String, sourceLanguage.UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
@@ -816,7 +878,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
         _quickEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
         _lastTranslationOK = ok;
         _quickEditButton.enabled = ok && _currentQuickResult.length > 0;
-        _replaceButton.enabled = ok && (_originElement != NULL) && ([_originSelection isEqualToString:job.source]);
+        _replaceButton.enabled = ok && (_originElement != NULL) &&
+            [FLWithoutWhitespace(_originSelection) isEqualToString:FLWithoutWhitespace(job.source)];
     } else {
         if (job.generation != _mainGeneration) return; // cleared or superseded
         _resultEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
@@ -1226,7 +1289,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [self settingsHeading:@"Перевод" subtitle:@"Качество русского и диагностика локальных моделей" onView:root];
     _settingsNaturalCheckbox = [self settingsCheckbox:@"Естественный русский перевод" tag:3 y:282 onView:root];
     _settingsLiteraryCheckbox = [self settingsCheckbox:@"Литературная вычитка русского (медленнее)" tag:4 y:242 onView:root];
-    [self settingsAction:@"Сравнить Hy-MT2 и TranslateGemma…" selector:@selector(compareTranslations:)
+    [self settingsAction:@"Сравнить Hy-MT2 и TranslateGemma / 4B и 12B…" selector:@selector(compareTranslations:)
                    frame:NSMakeRect(24, 158, 298, 34) onView:root];
     [self settingsAction:@"Открыть журнал перевода…" selector:@selector(openTranslationDiagnostics:)
                    frame:NSMakeRect(336, 158, 282, 34) onView:root];

@@ -216,7 +216,12 @@
     _modelSession = nil;
     _verifyingModel = NO;
     if (success) {
-        [NSUserDefaults.standardUserDefaults setObject:FLModels()[(NSUInteger)index][@"id"] forKey:@"modelID"];
+        // A/B installation of the experimental 12B must not silently replace
+        // the user's current trusted 4B model. They can click «Использовать».
+        NSString *downloadedID = FLModels()[(NSUInteger)index][@"id"];
+        if (![downloadedID isEqualToString:@"translategemma-12b"]) {
+            [NSUserDefaults.standardUserDefaults setObject:downloadedID forKey:@"modelID"];
+        }
         _statusLabel.stringValue = @"Локальная модель готова · ⌘4";
     }
     [self updateModelUI];

@@ -23,4 +23,4 @@ for case in cases:
             assert j['chat_template_kwargs']['source_lang_code']==case['source_lang']
             assert j['chat_template_kwargs']['target_lang_code']==case['target_lang']
             assert j['messages'][0]['content']==case['source']
-print(f'OK: {len(cases)} corpus entries across 5 languages; both model payloads checked')
+print(f'OK: {len(cases)} corpus entries across 5 languages; all model payloads checked')

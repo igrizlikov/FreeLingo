@@ -3,7 +3,7 @@
 
 MAC ONLY; no extra pip packages; writes a PRIVATE local report; never uploads text.
 This reports model outputs and timings. HUMAN REVIEW decides translation quality.
-Run from the FreeLingo 0.6.7 source folder after build or with the app installed.
+Run from the FreeLingo 0.6.12 source folder after build or with the app installed.
 """
 from __future__ import annotations
 import argparse
@@ -25,6 +25,7 @@ CASES = ROOT / 'replica/quality_cases.json'
 MODEL_FILES = {
     'Hy-MT2 7B': 'Hy-MT2-7B-Q4_K_M.gguf',
     'TranslateGemma 4B': 'translategemma-4b_Q4_K_M.gguf',
+    'TranslateGemma 12B': 'translategemma-12b-it-Q4_K_M.gguf',
 }
 LANG_NAMES = {'ru':'Russian', 'en':'English', 'zh':'Chinese', 'fr':'French', 'it':'Italian'}
 
@@ -33,7 +34,7 @@ def app_server() -> Path:
                ROOT / 'dist/FreeLingo.app/Contents/MacOS/llama-server']
     for p in choices:
         if p.is_file(): return p
-    raise RuntimeError('Не найден llama-server. Установи FreeLingo 0.6.7 в /Applications.')
+    raise RuntimeError('Не найден llama-server. Установи FreeLingo в /Applications.')
 
 def json_call(url: str, token: str, payload=None, timeout=240) -> dict:
     body = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
@@ -75,15 +76,21 @@ def payload_for(model_name: str, case: dict) -> dict:
             'messages':[{'role':'user','content':text}]}
 
 def main():
-    parser=argparse.ArgumentParser(description='Локальный A/B-тест Hy-MT2 и TranslateGemma')
+    parser=argparse.ArgumentParser(description='Локальный A/B-тест TranslateGemma 4B / 12B или Hy-MT2')
     parser.add_argument('--limit',type=int,default=0,help='0 = все тексты')
+    parser.add_argument('--models', default='TranslateGemma 4B,TranslateGemma 12B',
+                        help='Перечисли названия моделей через запятую')
     args=parser.parse_args()
     if sys.platform != 'darwin': raise SystemExit('Тест запускается только на macOS.')
     binary=app_server()
     cases=json.loads(CASES.read_text())
     if args.limit: cases=cases[:args.limit]
+    selected = [name.strip() for name in args.models.split(',')]
+    if len(selected) != 2 or len(set(selected)) != 2 or any(name not in MODEL_FILES for name in selected):
+        raise SystemExit('Выбери две разные модели из: ' + ', '.join(MODEL_FILES))
     output=[]
-    for name, filename in MODEL_FILES.items():
+    for name in selected:
+        filename = MODEL_FILES[name]
         model=MODELS / filename
         if not model.is_file() or model.stat().st_size < 2_000_000_000 or model.open('rb').read(4)!=b'GGUF':
             raise SystemExit(f'Скачай модель {name} через менеджер FreeLingo, затем запусти сравнение ещё раз.')
@@ -109,8 +116,8 @@ def main():
             except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=10)
             log.close()
     folder=SUPPORT / 'Diagnostics';folder.mkdir(parents=True,exist_ok=True)
-    report=folder / 'comparison-0.6.7.md'
-    pieces=['# FreeLingo 0.6.7 — локальное сравнение переводов','',
+    report=folder / 'comparison-0.6.12.md'
+    pieces=['# FreeLingo 0.6.12 — локальное сравнение переводов','',
             'Автоматическое ранжирование отключено. Оценка естественности требует носителя языка.','']
     for case in cases:
         pieces.extend(['## '+case['id'], '','**Исходный:** '+case['source'],''])
@@ -120,7 +127,7 @@ def main():
                 pieces.extend([f"**{item['model']} ({item['seconds']} с):**",'',item['output'] or 'Ошибка: '+str(item['error']),''])
         pieces.append('**Проверить:** '+', '.join(case.get('human_checks',[])));pieces.append('')
     report.write_text('\n'.join(pieces),encoding='utf-8')
-    (folder/'comparison-0.6.7.json').write_text(json.dumps(output,ensure_ascii=False,indent=2))
+    (folder/'comparison-0.6.12.json').write_text(json.dumps(output,ensure_ascii=False,indent=2))
     print('Отчёт сохранён:',report)
 
 if __name__=='__main__':

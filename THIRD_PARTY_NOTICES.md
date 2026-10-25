@@ -19,3 +19,6 @@ Sparkle update framework (https://github.com/sparkle-project/Sparkle) is used to
   **not** FreeLingo's MIT license. Review the applicable license before
   downloading. GGUF weights are never included in the FreeLingo DMG.
 - Translation quality and llama.cpp compatibility are experimental.
+
+## TranslateGemma 12B Q4_K_M (experimental optional download)
+Google TranslateGemma model weights are governed by Google's Gemma Terms of Use and Prohibited Use Policy, not the FreeLingo MIT license. Community GGUF quantization by bullerwins: https://huggingface.co/bullerwins/translategemma-12b-it-GGUF . Downloaded by the user at runtime; not bundled with FreeLingo. SHA-256 (HF file page): 9196d728812afbf5efc10b539298585725edc3a4ecc092c22fdde5bbaf41879e.

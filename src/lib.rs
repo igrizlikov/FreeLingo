@@ -1,7 +1,10 @@
-//! FreeLingo 0.6.11 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.12 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -20,6 +23,9 @@ struct Backend {
     token: String,
 }
 static BACKEND: OnceLock<Mutex<Option<Backend>>> = OnceLock::new();
+static TRACE_HASHER: OnceLock<RandomState> = OnceLock::new();
+static TRACE_SESSION: OnceLock<String> = OnceLock::new();
+static TRACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn backend() -> &'static Mutex<Option<Backend>> {
     BACKEND.get_or_init(|| Mutex::new(None))
 }
@@ -198,78 +204,84 @@ fn translate_gemma_model(model: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// This log intentionally contains NO source or translation content.
-// Users can inspect rejected edits without revealing clipboard contents.
-fn translation_diagnostic(model: &Path, event: &str, detail: &str) {
-    let Some(models_dir) = model.parent() else { return; };
-    let Some(support) = models_dir.parent() else { return; };
-    let log_dir = support.join("Logs");
-    if fs::create_dir_all(&log_dir).is_err() { return; }
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    // Only constant status strings are passed as event and detail.
-    if let Ok(mut file) = File::options().create(true).append(true)
-        .open(log_dir.join("translation-diagnostics.log")) {
+// A per-process keyed SipHash prevents offline guessing of common source snippets
+// from the log. Its secret key is never written to disk; hashes are comparable
+// ONLY during one FreeLingo process, not across app restarts.
+fn private_fingerprint(text: &str) -> String {
+    let mut hasher = TRACE_HASHER.get_or_init(RandomState::new).build_hasher();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn trace_session() -> &'static str {
+    TRACE_SESSION.get_or_init(|| random_token()
+        .map(|s| s.chars().take(12).collect())
+        .unwrap_or_else(|_| format!("pid{}", std::process::id())))
+}
+
+fn trace_language(code: &str) -> &'static str {
+    match code { "ru" => "ru", "en" => "en", "fr" => "fr", "it" => "it",
+                 "zh" => "zh", "de" => "de", "fi" => "fi", "es" => "es",
+                 "ja" => "ja", _ => "unknown" }
+}
+
+fn trace_origin(origin: &str) -> &'static str {
+    match origin { "main" => "main", "hotkey" => "hotkey", "hotkey_clipboard" => "hotkey_clipboard", "ab" => "ab",
+                   "ocr" => "ocr", "clipboard" => "clipboard", _ => "unknown" }
+}
+
+// The diagnostic log holds ONLY metadata: no text, translated results, full
+// paths, prompts, HTTP bodies or user-defined strings. Do not log errors from
+// external services because they can contain private input excerpts.
+struct TranslationTrace {
+    id: u64,
+    origin: &'static str,
+    raw_hash: String,
+    source_hash: String,
+    content_hash: String,
+    raw_chars: usize,
+    chars: usize,
+    paragraphs: usize,
+}
+impl TranslationTrace {
+    fn new(source: &str, origin: &str) -> Self {
+        let normalized = normalized_translation_source(source);
+        Self {
+            id: TRACE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1,
+            origin: trace_origin(origin),
+            raw_hash: private_fingerprint(source),
+            source_hash: private_fingerprint(&normalized),
+            // Ignore whitespace to determine whether flattened AX text is the
+            // same content as paragraph-preserving clipboard text.
+            content_hash: private_fingerprint(&normalized.chars().filter(|c| !c.is_whitespace()).collect::<String>()),
+            raw_chars: source.chars().count(),
+            chars: normalized.chars().count(),
+            paragraphs: normalized.split('\n').count(),
+        }
+    }
+    fn line(&self, model: &Path, event: &str, detail: &str) -> String {
+        let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let name = model.file_name().and_then(|x| x.to_str()).unwrap_or("unknown");
-        let _ = writeln!(file, "{seconds} model={name} event={event} detail={detail}");
+        // Names are fixed identifiers from our embedded model catalog.
+        let safe_filename = name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        let name = if safe_filename && (name.starts_with("Hy-MT2") ||
+            name.starts_with("translategemma-") || name.starts_with("Qwen3-")) { name } else { "unknown" };
+        format!("{seconds} session={} request_id={} origin={} model={} event={} raw_hash={} source_hash={} content_hash={} raw_chars={} chars={} lines={} {}\n",
+            trace_session(), self.id, self.origin, name, event, self.raw_hash, self.source_hash, self.content_hash,
+            self.raw_chars, self.chars, self.paragraphs, detail)
+    }
+    fn log(&self, model: &Path, event: &str, detail: &str) {
+        let Some(log_dir) = model.parent().and_then(Path::parent).map(|p| p.join("Logs")) else { return; };
+        if fs::create_dir_all(&log_dir).is_err() { return; }
+        if let Ok(mut file) = File::options().create(true).append(true)
+            .open(log_dir.join("translation-diagnostics.log")) {
+            let _ = file.write_all(self.line(model, event, detail).as_bytes());
+        }
     }
 }
 
-// Trace fields are whitelisted, length-bounded and single-line even if the
-// diagnostic ABI is called with malformed/untrusted metadata. No content logged.
-#[derive(Clone, Debug)]
-struct TraceContext {
-    id: String,
-    origin: String,
-    source_hash: String,
-    source_lang: String,
-    target_lang: String,
-}
-impl TraceContext {
-    fn from_json(raw: &str) -> Self {
-        let obj: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-        fn safe_field(value: Option<&str>, max: usize) -> String {
-            let value = value.unwrap_or("unknown");
-            let valid = !value.is_empty() && value.len() <= max &&
-                value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.:".contains(&b));
-            if valid { value.to_owned() } else { "unknown".to_owned() }
-        }
-        Self {
-            id: safe_field(obj.get("id").and_then(Value::as_str), 64),
-            origin: safe_field(obj.get("origin").and_then(Value::as_str), 24),
-            source_hash: safe_field(obj.get("source_hash").and_then(Value::as_str), 64),
-            source_lang: safe_field(obj.get("source_lang").and_then(Value::as_str), 12),
-            target_lang: safe_field(obj.get("target_lang").and_then(Value::as_str), 12),
-        }
-    }
-}
-fn trace_event(model: &Path, trace: &TraceContext, event: &str, detail: &str) {
-    let Some(models) = model.parent() else { return; };
-    let Some(support) = models.parent() else { return; };
-    let log_dir = support.join("Logs");
-    if fs::create_dir_all(&log_dir).is_err() { return; }
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    let name = model.file_name().and_then(|x| x.to_str()).unwrap_or("unknown");
-    // Every field is sanitized to avoid log injection and leaking paths.
-    let safe = |s: &str, limit: usize| -> String {
-        if !s.is_empty() && s.len() <= limit && s.bytes().all(|b|
-            b.is_ascii_alphanumeric() || b"_-.:=>".contains(&b)) {
-            s.to_owned()
-        } else { "unknown".to_owned() }
-    };
-    if let Ok(mut file) = File::options().create(true).append(true)
-        .open(log_dir.join("translation-diagnostics.log")) {
-        let _ = writeln!(file,
-            "{seconds} v2 id={} origin={} model={} hash={} detected={} target={} event={} detail={}",
-            trace.id, trace.origin, safe(name, 128), trace.source_hash,
-            trace.source_lang, trace.target_lang, safe(event, 32), safe(detail, 220));
-    }
-}
-fn request_chunk_count(source: &str, whole: bool) -> usize {
-    if whole { return 1; }
-    source.split_inclusive('\n').map(|line| {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        if body.trim().is_empty() { 0 } else { split_long_line(body, 1100).len() }
-    }).sum()
+fn normalized_translation_source(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n").trim().to_owned()
 }
 
 fn translation_target(target: &str) -> &str {
@@ -388,10 +400,19 @@ fn plain_answer(value: &str) -> String {
     text.to_owned()
 }
 
-fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str) -> Result<String, String> {
+fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str, trace: &TranslationTrace, chunk_index: usize) -> Result<String, String> {
     let mut previous_error = "Модель вернула некачественный результат".to_owned();
     for attempt in 0..3 {
         let payload = make_payload(source, target, operation, &session.model, attempt)?;
+        // Log the exact sampling parameters used by this attempt, not just UI preferences.
+        let sampling = format!("chunk={} attempt={} temperature={} top_p={} top_k={} repeat_penalty={} max_tokens={}",
+            chunk_index, attempt + 1,
+            payload.get("temperature").map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
+            payload.get("top_p").map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
+            payload.get("top_k").map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
+            payload.get("repeat_penalty").map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
+            payload.get("max_tokens").map(|v| v.to_string()).unwrap_or_else(|| "default".into()));
+        trace.log(&session.model, "sampling", &sampling);
         let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
             &session.token, Some(&payload.to_string()), "240")?;
         if let Some(err) = answer.get("error") { return Err(err.to_string()); }
@@ -459,18 +480,22 @@ fn russian_polish(session: &Backend, source: &str, draft: &str) -> (String, &'st
     (draft.to_owned(), last_reason)
 }
 
-fn polish_document(session: &Backend, original: &str, translation: &str) -> String {
+fn polish_document(session: &Backend, original: &str, translation: &str, trace: &TranslationTrace) -> String {
     let source_lines: Vec<&str> = original.split('\n').collect();
     let translated_lines: Vec<&str> = translation.split('\n').collect();
     if source_lines.len() != translated_lines.len() {
-        translation_diagnostic(&session.model, "review", "структура_абзацев_не_совпала");
+        trace.log(&session.model, "review", "status=skipped reason=paragraph_mismatch");
         return translation.to_owned();
     }
     source_lines.iter().zip(translated_lines.iter())
         .map(|(source, draft)| {
             if source.trim().is_empty() || draft.trim().is_empty() { return (*draft).to_owned(); }
             let (revision, reason) = russian_polish(session, source, draft);
-            translation_diagnostic(&session.model, "review", reason);
+            trace.log(&session.model, "review", &format!("status={}", match reason {
+                "принято" => "accepted", "без_изменений" => "unchanged",
+                "ошибка_движка" => "engine_error", "ответ_обрезан" => "truncated",
+                "нет_ответа" => "no_response", "потеря_фактов_или_языка" => "quality_guard",
+                "подозрительная_длина" => "length_guard", _ => "rejected" }));
             revision
         }).collect::<Vec<_>>().join("\n")
 }
@@ -486,17 +511,10 @@ fn whole_document_mode(source: &str, operation: &str, model: &Path) -> bool {
     length <= 3000 && (!has_cjk(source) || length <= 1300)
 }
 
-fn request_local(source: &str, target: &str, operation: &str, model: &str, trace: &TraceContext) -> Result<String, String> {
+fn request_local(source: &str, target: &str, operation: &str, model: &str, source_language: &str, trace: &TranslationTrace) -> Result<String, String> {
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
-    let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized_source = normalized_source.trim();
-    // The input hash is a per-launch HMAC from AppKit, NOT an unsalted SHA.
-    // The source and generated content never enter this log.
-    trace_event(&path, trace, "start", &format!("bytes:{}:chars:{}:lines:{}:operation:{}:route:{}",
-        normalized_source.len(), normalized_source.chars().count(),
-        normalized_source.lines().count(), operation, target));
     if translate_gemma_model(&path) {
         gemma_language_codes(target)?;
         if operation != "translate" && operation != "translate_natural" {
@@ -518,7 +536,12 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, trace
         Some(russian_editor_model(&path).ok_or(
             "Для литературной вычитки нужна Qwen3 4B или 8B. Скачай её в разделе «Модели».".to_owned())?)
     } else { None };
-    translation_diagnostic(&path, "request", if operation == "translate_reviewed" { "вычитка_включена" } else { "обычный_перевод" });
+    // Only ASCII language identifiers and validated operations enter the log.
+    let pair = target.chars().filter(|c| c.is_ascii_lowercase() || *c == '>').collect::<String>();
+    let mode = match operation { "translate" => "translate", "translate_natural" => "translate_natural",
+        "translate_reviewed" => "translate_reviewed", "rewrite" => "rewrite", _ => "unknown" };
+    trace.log(&path, "request", &format!("pair={} source_lang={} target_lang={} operation={}",
+        pair, trace_language(source_language), trace_language(translation_target(target)), mode));
     let mut guard = backend().lock().map_err(|_| "Внутренняя ошибка движка".to_string())?;
     let restart = match guard.as_mut() {
         None => true,
@@ -531,21 +554,25 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, trace
     let session = guard.as_ref().ok_or("Движок не запущен")?;
     // Same canonical source handling for the main editor, popup (Cmd+4) and A/B.
     // Preserve paragraph breaks; normalize CRLF from browsers and text editors.
+    let normalized_source = normalized_translation_source(source);
+    let normalized_source = normalized_source.as_str();
     let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
     let short_specialized_document = whole_document_mode(normalized_source, operation, &path);
-    trace_event(&path, trace, "layout", &format!("mode:{}:chunks:{}:sampling:{}",
-        if short_specialized_document { "whole" } else { "chunked" },
-        request_chunk_count(normalized_source, short_specialized_document),
-        if translate_gemma_model(&path) { "gemma_t0" } else if hy_mt2_model(&path) { "hymt2_t07" } else { "qwen_t01" }));
     let mut output = String::new();
+    let expected_chunks = if short_specialized_document { 1 }
+        else { normalized_source.split_inclusive('\n').map(|line| {
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            if body.trim().is_empty() { 0 } else { split_long_line(body, 1100).len() }
+        }).sum() };
+    trace.log(&path, "layout", &format!("layout={} chunks={}",
+        if short_specialized_document { "whole" } else { "chunked" }, expected_chunks));
     if short_specialized_document {
-        translation_diagnostic(&path, "layout", "единый_контекст");
         // Whole-document context is essential to resolve kinship, chronology,
         // pronouns and idioms in a short story. This also eliminates separate
         // model invocations caused by hard line breaks in the source editor.
-        output = request_chunk(session, normalized_source, target, translate_mode)?;
+        output = request_chunk(session, normalized_source, target, translate_mode, trace, 1)?;
     } else {
-        translation_diagnostic(&path, "layout", "по_фрагментам");
+        let mut chunk_index = 0;
         for line in normalized_source.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
         let separator = if line.ends_with('\n') { "\n" } else { "" };
@@ -554,15 +581,16 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, trace
             let parts = split_long_line(body, 1100);
             for (index, part) in parts.iter().enumerate() {
                 if index > 0 { output.push(' '); }
-                output.push_str(&request_chunk(session, part, target, translate_mode)?);
+                chunk_index += 1;
+                output.push_str(&request_chunk(session, part, target, translate_mode, trace, chunk_index)?);
             }
         }
         output.push_str(separator);
         }
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
-    translation_diagnostic(&path, "translation", "результат_получен");
-    trace_event(&path, trace, "result", "generated");
+    trace.log(&path, "translation", &format!("status=success result_hash={} result_chars={}",
+        private_fingerprint(&output), output.chars().count()));
     if let Some(editor_path) = editor_path {
         // Load only one big model at a time; replace Hy-MT2 with Qwen for review.
         if let Some(mut previous) = guard.take() {
@@ -570,47 +598,48 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, trace
         }
         *guard = Some(start_server(&editor_path)?);
         let editor = guard.as_ref().ok_or("Редактор не запущен")?;
-        return Ok(polish_document(editor, source, &output));
+        let polished = polish_document(editor, source, &output, trace);
+        trace.log(&path, "final", &format!("status=success result_hash={} result_chars={}",
+            private_fingerprint(&polished), polished.chars().count()));
+        return Ok(polished);
     }
+    trace.log(&path, "final", &format!("status=success result_hash={} result_chars={}",
+        private_fingerprint(&output), output.chars().count()));
     Ok(output)
 }
 
 /// Async ABI: callback on background thread; caller owns returned C string.
-fn start_async(text: *const c_char, target: *const c_char,
-    operation: *const c_char, model: *const c_char, trace_json: *const c_char,
-    done: Option<Completion>, context: *mut c_void) {
+#[no_mangle]
+pub extern "C" fn fl_work_async_diagnostic(text: *const c_char, target: *const c_char,
+    operation: *const c_char, model: *const c_char, origin: *const c_char,
+    source_language: *const c_char, done: Option<Completion>, context: *mut c_void) {
     let text = c_arg(text);
     let target = c_arg(target);
     let operation = c_arg(operation);
     let model = c_arg(model);
-    let trace = TraceContext::from_json(&c_arg(trace_json));
+    let origin = c_arg(origin);
+    let source_language = c_arg(source_language);
+    // Instantiate the keyed source fingerprint before entering the worker.
+    let trace = TranslationTrace::new(&text, &origin);
     let context_id = context as usize;
     thread::spawn(move || {
-        let began = Instant::now();
-        let outcome = std::panic::catch_unwind(|| request_local(&text, &target, &operation, &model, &trace))
+        let outcome = std::panic::catch_unwind(|| request_local(&text, &target, &operation, &model, &source_language, &trace))
             .unwrap_or_else(|_| Err("Ошибка локального движка".into()));
-        trace_event(Path::new(&model), &trace, "finish", &format!("status:{}:ms:{}",
-            if outcome.is_ok() { "ok" } else { "error" }, began.elapsed().as_millis()));
         let (result, ok) = match outcome { Ok(s) => (s, 1), Err(e) => (e, 0) };
+        if ok == 0 { trace.log(Path::new(&model), "translation", "status=error"); }
         let ptr = CString::new(result.replace('\0', " ")).expect("NUL removed").into_raw();
         if let Some(callback) = done { callback(ptr, ok, context_id as *mut c_void); }
         else { fl_free_string(ptr); }
     });
 }
 
-#[no_mangle]
-pub extern "C" fn fl_work_async_traced(text: *const c_char, target: *const c_char,
-    operation: *const c_char, model: *const c_char, trace_json: *const c_char,
-    done: Option<Completion>, context: *mut c_void) {
-    start_async(text, target, operation, model, trace_json, done, context);
-}
-
-// Keep the previous FFI symbol for external consumers of the static library.
+// Retain the original C entry point for callers not yet providing provenance.
 #[no_mangle]
 pub extern "C" fn fl_work_async(text: *const c_char, target: *const c_char,
     operation: *const c_char, model: *const c_char,
     done: Option<Completion>, context: *mut c_void) {
-    start_async(text, target, operation, model, std::ptr::null(), done, context);
+    fl_work_async_diagnostic(text, target, operation, model,
+        c"unknown".as_ptr(), c"unknown".as_ptr(), done, context);
 }
 
 #[no_mangle]
@@ -629,28 +658,42 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn trace_fields_reject_newlines_and_untrusted_strings() {
-        let trace = TraceContext::from_json(r#"{"id":"5b9c-abc","origin":"main\nsource=SECRET","source_hash":"abcdef012345","source_lang":"en","target_lang":"ru"}"#);
-        assert_eq!(trace.id, "5b9c-abc");
-        assert_eq!(trace.origin, "unknown");
-        assert_eq!(trace.source_hash, "abcdef012345");
-        assert_eq!(trace.source_lang, "en");
-        assert_eq!(trace.target_lang, "ru");
-        let fallback = TraceContext::from_json("not JSON");
-        assert_eq!(fallback.id, "unknown");
-        assert_eq!(fallback.source_hash, "unknown");
+    #[test] fn whitespace_only_layout_differences_have_identical_content_hashes() {
+        let main = TranslationTrace::new("English line 1\nEnglish line 2", "main");
+        let hotkey = TranslationTrace::new("English line 1English line 2", "hotkey_clipboard");
+        assert_ne!(main.source_hash, hotkey.source_hash);
+        assert_eq!(main.content_hash, hotkey.content_hash);
+        assert_eq!(hotkey.origin, "hotkey_clipboard");
+        let model = Path::new("/Models/translategemma-12b-it-Q4_K_M.gguf");
+        assert!(translate_gemma_model(model));
+        assert!(make_payload("Hello!", "en>ru", "translate", model, 0).is_ok());
     }
-    #[test] fn diagnostic_chunk_count_matches_actual_split() {
-        let short = "Title\nOne sentence.\n\nSecond sentence.";
-        assert_eq!(request_chunk_count(short, true), 1);
-        assert_eq!(request_chunk_count(short, false), 3);
-        let long = "a ".repeat(800);
-        assert!(request_chunk_count(&long, false) >= 2);
+
+    #[test] fn keyed_trace_fingerprint_is_stable_per_session_and_redacted() {
+        let text = "My private story: two brothers and my mother.";
+        let trace_main = TranslationTrace::new(text, "main");
+        let trace_hotkey = TranslationTrace::new(text, "hotkey");
+        assert_eq!(trace_main.source_hash, trace_hotkey.source_hash);
+        assert_ne!(trace_main.id, trace_hotkey.id);
+        assert_ne!(trace_main.raw_hash, private_fingerprint("a different text"));
+        let line = trace_main.line(Path::new("/Models/translategemma-4b_Q4_K_M.gguf"),
+            "request", "pair=en>ru operation=translate");
+        assert!(line.contains("origin=main"));
+        assert!(line.contains("request_id="));
+        assert!(line.contains("source_hash="));
+        assert!(!line.contains(text));
+        assert!(!line.contains("/Models/"));
+        assert_eq!(trace_origin("unexpected\ntrace=injected"), "unknown");
+        assert_eq!(trace_language("en\nsource=injected"), "unknown");
     }
-    #[test] fn canonical_whitespace_preserves_paragraph_structure() {
-        let raw = "\r\nMy Wonderful Family\r\n\r\nTwo brothers.\r\n";
-        let canonical = raw.replace("\r\n", "\n").replace('\r', "\n");
-        assert_eq!(canonical.trim(), "My Wonderful Family\n\nTwo brothers.");
+    #[test] fn fingerprint_normalizes_crlf_and_outer_spaces() {
+        let raw_a = "  Hello\r\nworld!\r\n";
+        let raw_b = "Hello\nworld!";
+        let a = TranslationTrace::new(raw_a, "main");
+        let b = TranslationTrace::new(raw_b, "hotkey");
+        assert_eq!(a.source_hash, b.source_hash);
+        assert_ne!(a.raw_hash, b.raw_hash);
+        assert_eq!(a.chars, b.chars);
     }
     #[test] fn whole_document_context_for_short_specialized_texts() {
         let gemma = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
