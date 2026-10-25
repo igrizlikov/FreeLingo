@@ -20,3 +20,5 @@ F12,Hide Dock icon while keeping menu bar,AppKit,must,untested,native/main.m NSA
 F13,Launch at login,ServiceManagement,must,untested,native/main.m SMAppService.mainAppService register/unregister,Needs macOS permissions and real login test
 F14,In-app update,Updater,must,blocked,native/main.m SPUStandardUpdaterController; release.yml,Requires one-time signing secret and public key in GitHub Actions
 F15,Native template menu-bar icon,AppKit,should,untested,assets/MenubarIcon.svg and PNG and native/main.m,Needs menu bar check in light/dark appearance
+F13,Editable translation in floating panel,UI,must,untested,native/main.m; user screenshot and report,0.6.1 change requires macOS E2E test
+F14,Natural English to Russian paragraph translation,Core,must,untested,src/lib.rs; Qwen3 8B file metadata,User sample regression must be tested with installed model

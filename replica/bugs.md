@@ -22,3 +22,11 @@
 - CAUSE STATUS: CI EBUSY transient is likely; exact resource holder UNKNOWN (no system trace).
 - FIX: sync, five bounded retries with backoff, remove partial image and verify before upload.
 - STATUS: shell syntax and mocked retry tests locally; real macOS CI UNTESTED.
+
+
+## 0.6.1 — регрессионные проблемы, выявленные пользователем
+
+| ID | Приоритет | Наблюдение | Причина/гипотеза | Изменение | Статус |
+| --- | --- | --- | --- | --- | --- |
+| FL-QA-01 | P1 | Плохой перевод: plural brothers -> singular, Chinese 护士, буквальные выражения | SOURCE_CONFIRMED: промпт без проверки чисел/смысла и 1700 max_tokens; влияние размера модели подтверждено не было | Более подробный prompt, абзацные запросы, retry при чужой письменности / truncation, Qwen3 8B | Непроверено на Mac |
+| FL-QA-02 | P0 | «Редактировать» не открывает доступное редактирование; после повторных кликов приложение закрылось | SOURCE_CONFIRMED: результат в главном окне readonly; причина crash UNKNOWN без .ips | Редактирование непосредственно в NSPanel и editable main result | Непроверено на Mac |

@@ -87,7 +87,7 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
 @implementation FLJob
 @end
 
-@interface FLAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDownloadDelegate>
+@interface FLAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDownloadDelegate, NSTextViewDelegate>
 - (void)hotkey:(UInt32)identifier;
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job;
 @end
@@ -128,6 +128,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSPopUpButton *_mainLanguage;
     NSPopUpButton *_quickLanguage;
     NSButton *_replaceButton;
+    NSButton *_quickEditButton;
     NSButton *_workButton;
     NSTextField *_statusLabel;
     NSString *_currentQuickSource;
@@ -161,7 +162,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     (void)note;
     _sessionHistory = [NSMutableArray new];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        @"modelID": @"qwen3-1.7b", @"languageIndex": @0,
+        @"modelID": @"qwen3-4b", @"languageIndex": @0,
         @"showDockIcon": @NO
     }];
     [self createApplicationMenu];
@@ -266,7 +267,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [root addSubview:languageLabel];
 
     NSScrollView *source = FLEditor(&_sourceEditor, YES);
-    NSScrollView *result = FLEditor(&_resultEditor, NO);
+    NSScrollView *result = FLEditor(&_resultEditor, YES); // Users can correct translations in place.
     _sourceEditor.string = @"";
     _resultEditor.string = @"";
     NSStackView *columns = [NSStackView stackViewWithViews:@[source, result]];
@@ -329,12 +330,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [root addSubview:dismiss];
     NSScrollView *scroll = FLEditor(&_quickEditor, NO);
     _quickEditor.font = [NSFont systemFontOfSize:20];
+    _quickEditor.delegate = self;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:scroll];
     NSButton *copy = FLButton(@"Копировать", self, @selector(copyQuick:));
-    NSButton *edit = FLButton(@"Редактировать…", self, @selector(editQuick:));
+    _quickEditButton = FLButton(@"Редактировать", self, @selector(editQuick:));
     _replaceButton = FLButton(@"Заменить", self, @selector(replaceSelection:));
-    NSStackView *actions = [NSStackView stackViewWithViews:@[copy, edit, _replaceButton]];
+    NSStackView *actions = [NSStackView stackViewWithViews:@[copy, _quickEditButton, _replaceButton]];
     actions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     actions.spacing = 12;
     actions.translatesAutoresizingMaskIntoConstraints = NO;
@@ -527,6 +529,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 }
 
 - (void)showQuickForText:(NSString *)source mode:(NSString *)mode {
+    [self finishQuickEditing];
     _currentQuickSource = [source copy];
     _currentQuickResult = @"";
     _currentQuickMode = [mode copy];
@@ -550,6 +553,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 - (void)request:(NSString *)text mode:(NSString *)mode quick:(BOOL)quick language:(NSString *)language {
     if (!text.length) return;
+    if (quick) [self finishQuickEditing];
     NSInteger modelIndex = FLActiveModelIndex();
     if (!FLModelInstalled(modelIndex)) {
         [self showModels:nil];
@@ -571,6 +575,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
     if (job.quick) {
+        if (_quickEditor.editable) return;
         if (job.generation != _quickGeneration || ![_currentQuickSource isEqualToString:job.source] || ![_currentQuickMode isEqualToString:job.mode]) return;
         _currentQuickResult = ok ? result : @"";
         _quickEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
@@ -624,16 +629,45 @@ static void FLRustCallback(char *raw, int success, void *context) {
     }
 }
 - (void)showMain:(id)sender { (void)sender; [_mainWindow makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; }
+// Do not move between an NSPanel and a dockless main NSWindow just to edit.
+// Editing in place also preserves the original selection used by Replace.
+- (void)finishQuickEditing {
+    if (!_quickEditor) return;
+    if (_quickEditor.editable) {
+        _currentQuickResult = [_quickEditor.string copy];
+        _quickEditor.editable = NO;
+    }
+    _quickEditButton.title = @"Редактировать";
+}
 - (void)editQuick:(id)sender {
     (void)sender;
-    _sourceEditor.string = _currentQuickSource ?: @"";
-    _resultEditor.string = _currentQuickResult ?: @"";
-    _tabs.selectedSegment = [_currentQuickMode isEqualToString:@"rewrite"] ? 1 : 0;
-    [self tabChanged:nil];
-    [_quickPanel orderOut:nil];
-    [self showMain:nil];
+    if (!_currentQuickResult.length) {
+        [self presentMessage:@"Сначала получи перевод, затем его можно будет исправить."];
+        return;
+    }
+    if (_quickEditor.editable) {
+        [self finishQuickEditing];
+        return;
+    }
+    _quickEditor.editable = YES;
+    _quickEditButton.title = @"Готово";
+    [_quickPanel makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [_quickPanel makeFirstResponder:_quickEditor];
+    [_quickEditor setSelectedRange:NSMakeRange(_quickEditor.string.length, 0)];
 }
-- (void)dismissQuick:(id)sender { (void)sender; [_quickPanel orderOut:nil]; }
+- (void)textDidChange:(NSNotification *)notification {
+    if (notification.object == _quickEditor && _quickEditor.editable) {
+        _currentQuickResult = [_quickEditor.string copy];
+        _replaceButton.enabled = _lastTranslationOK && _currentQuickResult.length > 0 &&
+            _originElement != NULL && [_originSelection isEqualToString:_currentQuickSource];
+    }
+}
+- (void)dismissQuick:(id)sender {
+    (void)sender;
+    [self finishQuickEditing];
+    [_quickPanel orderOut:nil];
+}
 - (void)copyQuick:(id)sender {
     (void)sender;
     if (_currentQuickResult.length) {

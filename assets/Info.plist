@@ -9,13 +9,14 @@
   <key>CFBundleDisplayName</key><string>FreeLingo</string>
   <key>CFBundleIconFile</key><string>FreeLingo.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.6.0</string>
-  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleShortVersionString</key><string>0.6.2</string>
+  <key>CFBundleVersion</key><string>12</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>SUFeedURL</key><string>https://raw.githubusercontent.com/igrizlikov/FreeLingo/main/appcast.xml</string>
   <key>SUEnableAutomaticChecks</key><true/>
-  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
+  <key>SUAutomaticallyUpdate</key><true/>
   <key>SUVerifyUpdateBeforeExtraction</key><true/>
   <!-- Injected by CI from GitHub Actions variable SPARKLE_PUBLIC_ED_KEY.
        Leave empty on developer builds, which will NOT run the updater. -->

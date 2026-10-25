@@ -23,6 +23,13 @@ BIN="$APP/Contents/MacOS"
 rm -rf "$APP"
 mkdir -p "$BIN" "$APP/Contents/Resources"
 cp assets/Info.plist "$APP/Contents/Info.plist"
+# Fail closed on release builds: never ship a release without an update verification key.
+if [[ "${REQUIRE_SPARKLE_SIGNING:-0}" == "1" ]]; then
+  [[ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]] || { echo 'ERROR: SPARKLE_PUBLIC_ED_KEY is not configured' >&2; exit 1; }
+  [[ "$(printf '%s' "$SPARKLE_PUBLIC_ED_KEY" | base64 -D 2>/dev/null | wc -c | tr -d ' ')" == "32" ]] || {
+    echo 'ERROR: Sparkle public key must be base64 of 32 bytes' >&2; exit 1;
+  }
+fi
 # Public key is not secret; must match the private EdDSA key used for Releases.
 if [[ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$APP/Contents/Info.plist"
