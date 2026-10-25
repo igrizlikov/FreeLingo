@@ -60,12 +60,26 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          # codesign needs the imported keychain on the user's search list,
+          # even when --keychain is supplied for identity selection.
+          # Preserve all existing entries (including paths containing spaces).
+          PREVIOUS_KEYCHAINS=()
+          while IFS= read -r entry; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"
+            entry="${entry#\"}"
+            entry="${entry%\"}"
+            [[ -z "$entry" ]] || PREVIOUS_KEYCHAINS+=("$entry")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" "${PREVIOUS_KEYCHAINS[@]}"
+          security default-keychain -d user -s "$KEYCHAIN"
+          security list-keychains -d user
           security import "$P12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
           rm -f "$P12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # Take the first imported identity; the signing P12 must contain only one identity.
           IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) .*/\1/p' | head -1)"
           [[ -n "$IDENTITY" ]] || { echo 'ERROR: P12 has no usable code-signing identity'; exit 1; }
+          security find-identity -v -p codesigning "$KEYCHAIN"
           echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           echo 'REQUIRE_STABLE_SIGNING=1' >> "$GITHUB_ENV"
