@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.13 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.14 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -201,6 +201,14 @@ fn start_server(model: &Path) -> Result<Backend, String> {
 fn translate_gemma_model(model: &Path) -> bool {
     model.file_name().and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase().starts_with("translategemma-"))
+        .unwrap_or(false)
+}
+
+// Only 12B uses larger document windows and paragraph-packing. Keep 4B
+// routing stable, so quality/performance comparisons remain meaningful.
+fn translate_gemma_12b_model(model: &Path) -> bool {
+    model.file_name().and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase().starts_with("translategemma-12b"))
         .unwrap_or(false)
 }
 
@@ -413,8 +421,20 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str,
             payload.get("repeat_penalty").map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
             payload.get("max_tokens").map(|v| v.to_string()).unwrap_or_else(|| "default".into()));
         trace.log(&session.model, "sampling", &sampling);
+        let started = Instant::now();
         let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
             &session.token, Some(&payload.to_string()), "240")?;
+        let timings = answer.get("timings");
+        let timing = |key: &str| -> String {
+            timings.and_then(|t| t.get(key))
+                .and_then(|v| if v.is_number() { Some(v.to_string()) } else { None })
+                .unwrap_or_else(|| "na".to_owned())
+        };
+        // Only counters and timings, NEVER prompts, results or response bodies.
+        trace.log(&session.model, "perf", &format!(
+            "chunk={} attempt={} wall_ms={} prompt_n={} prompt_ms={} predicted_n={} predicted_ms={}",
+            chunk_index, attempt + 1, started.elapsed().as_millis(),
+            timing("prompt_n"), timing("prompt_ms"), timing("predicted_n"), timing("predicted_ms")));
         if let Some(err) = answer.get("error") { return Err(err.to_string()); }
         let result = answer.pointer("/choices/0/message/content").and_then(Value::as_str)
             .ok_or("Движок не вернул текст")?;
@@ -508,7 +528,56 @@ fn whole_document_mode(source: &str, operation: &str, model: &Path) -> bool {
         return false;
     }
     let length = source.chars().count();
-    length <= 3000 && (!has_cjk(source) || length <= 1300)
+    // 12B can translate an English short story of about 3,000-3,600 chars
+    // in one inference pass. Earlier versions sent a 3,014-char story as
+    // nine separate HTTP requests. Keep the conservative CJK limit.
+    let latin_limit = if translate_gemma_12b_model(model) { 3600 } else { 3000 };
+    // Byte ceiling protects the 6,144-token context for Cyrillic and other
+    // multi-byte scripts, where character count alone underestimates cost.
+    length <= latin_limit && (!has_cjk(source) || length <= 1300)
+        && (!translate_gemma_12b_model(model) || source.len() <= 5200)
+}
+
+// Pack consecutive original lines into larger context windows when 12B
+// handles a long document. Preserve exact newline separators at *batch*
+// boundaries and never mix Latin/CJK byte budgets. The model is instructed
+// to preserve paragraph breaks inside each batch. Chunking changes the
+// translation context, so compare quality on-device before declaring it better.
+fn flush_translation_batch(pending: &mut String, batches: &mut Vec<(String, String)>) {
+    if pending.is_empty() { return; }
+    let raw = std::mem::take(pending);
+    let last_text = raw.trim_end_matches('\n').len();
+    let (text, suffix) = raw.split_at(last_text);
+    batches.push((text.to_owned(), suffix.to_owned()));
+}
+
+fn packed_translation_batches(source: &str) -> Vec<(String, String)> {
+    const MAX_CHARS: usize = 3000;
+    const MAX_BYTES: usize = 3800;
+    let mut batches = Vec::new();
+    let mut pending = String::new();
+    for line in source.split_inclusive('\n') {
+        let chars = line.chars().count();
+        let oversized = chars > MAX_CHARS || line.len() > MAX_BYTES;
+        if oversized {
+            flush_translation_batch(&mut pending, &mut batches);
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            let parts = split_long_line(body, 3000);
+            let last = parts.len();
+            for (i, part) in parts.into_iter().enumerate() {
+                let suffix = if i + 1 < last { " " }
+                    else if line.ends_with('\n') { "\n" } else { "" };
+                batches.push((part, suffix.to_owned()));
+            }
+        } else {
+            let would_overflow = pending.len() + line.len() > MAX_BYTES ||
+                pending.chars().count() + chars > MAX_CHARS;
+            if would_overflow { flush_translation_batch(&mut pending, &mut batches); }
+            pending.push_str(line);
+        }
+    }
+    flush_translation_batch(&mut pending, &mut batches);
+    batches
 }
 
 fn request_local(source: &str, target: &str, operation: &str, model: &str, source_language: &str, trace: &TranslationTrace) -> Result<String, String> {
@@ -549,7 +618,11 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
     };
     if restart {
         if let Some(mut old) = guard.take() { let _ = old.child.kill(); let _ = old.child.wait(); }
+        let boot_started = Instant::now();
         *guard = Some(start_server(&path)?);
+        trace.log(&path, "backend", &format!("started=1 startup_ms={} metal_layers=99 ctx=6144", boot_started.elapsed().as_millis()));
+    } else {
+        trace.log(&path, "backend", "started=0 reused=1");
     }
     let session = guard.as_ref().ok_or("Движок не запущен")?;
     // Same canonical source handling for the main editor, popup (Cmd+4) and A/B.
@@ -559,18 +632,33 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
     let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
     let short_specialized_document = whole_document_mode(normalized_source, operation, &path);
     let mut output = String::new();
+    let packed = if !short_specialized_document && translate_gemma_12b_model(&path)
+        && operation.starts_with("translate") {
+        Some(packed_translation_batches(normalized_source))
+    } else { None };
     let expected_chunks = if short_specialized_document { 1 }
-        else { normalized_source.split_inclusive('\n').map(|line| {
+        else if let Some(batches) = &packed {
+            batches.iter().filter(|(text, _)| !text.trim().is_empty()).count()
+        } else { normalized_source.split_inclusive('\n').map(|line| {
             let body = line.strip_suffix('\n').unwrap_or(line);
             if body.trim().is_empty() { 0 } else { split_long_line(body, 1100).len() }
         }).sum() };
     trace.log(&path, "layout", &format!("layout={} chunks={}",
-        if short_specialized_document { "whole" } else { "chunked" }, expected_chunks));
+        if short_specialized_document { "whole" } else if packed.is_some() { "packed" } else { "chunked" }, expected_chunks));
     if short_specialized_document {
         // Whole-document context is essential to resolve kinship, chronology,
         // pronouns and idioms in a short story. This also eliminates separate
         // model invocations caused by hard line breaks in the source editor.
         output = request_chunk(session, normalized_source, target, translate_mode, trace, 1)?;
+    } else if let Some(batches) = packed {
+        let mut chunk_index = 0;
+        for (text, separator) in batches {
+            if !text.trim().is_empty() {
+                chunk_index += 1;
+                output.push_str(&request_chunk(session, &text, target, translate_mode, trace, chunk_index)?);
+            }
+            output.push_str(&separator);
+        }
     } else {
         let mut chunk_index = 0;
         for line in normalized_source.split_inclusive('\n') {
@@ -658,6 +746,45 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twelve_b_short_story_over_three_thousand_chars_uses_one_request() {
+        let text = "A normal English sentence. ".repeat(126); // > 3,000 characters
+        let model12 = Path::new("/Models/translategemma-12b-it-Q4_K_M.gguf");
+        let model4 = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
+        assert!(text.len() > 3000 && text.len() <= 3600);
+        assert!(whole_document_mode(&text, "translate_natural", model12));
+        assert!(!whole_document_mode(&text, "translate_natural", model4));
+    }
+
+    #[test]
+    fn twelve_b_long_cyrillic_document_keeps_conservative_context() {
+        let src = "Это прекрасный длинный русский текст. ".repeat(90);
+        let model12 = Path::new("/Models/translategemma-12b-it-Q4_K_M.gguf");
+        assert!(src.chars().count() < 3600);
+        assert!(src.len() > 5200);
+        assert!(!whole_document_mode(&src, "translate", model12));
+    }
+
+    #[test]
+    fn twelve_b_long_text_packs_multiple_paragraphs_without_eating_separators() {
+        let src = (0..22).map(|n| format!("Paragraph {n}: The students go to school and study mathematics every day.\n\n"))
+            .collect::<String>();
+        let batches = packed_translation_batches(&src);
+        assert!(!batches.is_empty());
+        assert!(batches.len() < 22); // the old pipeline did one request per nonblank line
+        assert_eq!(batches.iter().map(|(t, sep)| format!("{t}{sep}")).collect::<String>(), src);
+        assert!(batches.iter().all(|(t, _)| t.chars().count() <= 3000 && t.len() <= 3800));
+    }
+
+    #[test]
+    fn twelve_b_long_single_line_respects_utf8_boundary() {
+        let src = format!("{}\n{}", "Long school sentence. ".repeat(180), "家庭语言学习".repeat(260));
+        let batches = packed_translation_batches(&src);
+        assert!(batches.len() > 2);
+        assert!(batches.iter().all(|(t, _)| t.is_char_boundary(t.len()) && t.len() <= 3800));
+    }
+
     #[test] fn whitespace_only_layout_differences_have_identical_content_hashes() {
         let main = TranslationTrace::new("English line 1\nEnglish line 2", "main");
         let hotkey = TranslationTrace::new("English line 1English line 2", "hotkey_clipboard");

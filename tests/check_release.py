@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.13'
-assert int(plist['CFBundleVersion']) == 23
+assert plist['CFBundleShortVersionString'] == '0.6.14'
+assert int(plist['CFBundleVersion']) == 24
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -138,7 +138,9 @@ print('OK: compact status menu, functional native settings tabs and preserved ac
 
 # v0.6.9: same whole-document translation engine for short texts, prevent window
 # lifetime use-after-close; retain user-selected translator across Sparkle updates.
-assert 'length <= 3000 && (!has_cjk(source) || length <= 1300)' in core
+assert 'length <= latin_limit && (!has_cjk(source) || length <= 1300)' in core
+assert 'source.len() <= 5200' in core
+assert 'if translate_gemma_12b_model(model) { 3600 } else { 3000 }' in core
 assert 'short_specialized_document' in core and '"whole"' in core and '"chunked"' in core
 assert '_mainWindow.releasedWhenClosed = NO' in main
 assert '_settingsWindow.releasedWhenClosed = NO' in main
