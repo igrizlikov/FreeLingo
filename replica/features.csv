@@ -25,3 +25,6 @@ F23,Multilingual A/B corpus (5 languages),Tests,should,partial,14 human-judged c
 F24,Compact menu-bar menu and AppKit settings sections,AppKit,should,untested,static tests only,macOS UI QA and signed release pending
 F25,Consistent short-text translation via main UI and hotkey,Rust/AppKit,must,untested,0.6.9 whole-document inference,Requires real Mac A/B same source test
 F26,Settings window stability after inference,AppKit,must,untested,0.6.9 window lifetime guards,Requires .ips triage and stress testing on macOS
+F27,Plain text paste in main editor,AppKit,should,untested,0.6.10 FLPlainTextView enforced plain text,macOS paste from Safari/Pages required
+F28,One-click clear source and result,AppKit,should,untested,0.6.10 clearMain and generation guard,macOS button and in-flight cancellation check required
+F29,Correlated privacy-safe main hotkey AB diagnostics,Rust/AppKit,must,untested,0.6.11 trace source and static tests,Needs macOS CI and same-input human comparison without app restart

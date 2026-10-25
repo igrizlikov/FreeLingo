@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.7 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.11 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -212,6 +212,64 @@ fn translation_diagnostic(model: &Path, event: &str, detail: &str) {
         let name = model.file_name().and_then(|x| x.to_str()).unwrap_or("unknown");
         let _ = writeln!(file, "{seconds} model={name} event={event} detail={detail}");
     }
+}
+
+// Trace fields are whitelisted, length-bounded and single-line even if the
+// diagnostic ABI is called with malformed/untrusted metadata. No content logged.
+#[derive(Clone, Debug)]
+struct TraceContext {
+    id: String,
+    origin: String,
+    source_hash: String,
+    source_lang: String,
+    target_lang: String,
+}
+impl TraceContext {
+    fn from_json(raw: &str) -> Self {
+        let obj: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        fn safe_field(value: Option<&str>, max: usize) -> String {
+            let value = value.unwrap_or("unknown");
+            let valid = !value.is_empty() && value.len() <= max &&
+                value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.:".contains(&b));
+            if valid { value.to_owned() } else { "unknown".to_owned() }
+        }
+        Self {
+            id: safe_field(obj.get("id").and_then(Value::as_str), 64),
+            origin: safe_field(obj.get("origin").and_then(Value::as_str), 24),
+            source_hash: safe_field(obj.get("source_hash").and_then(Value::as_str), 64),
+            source_lang: safe_field(obj.get("source_lang").and_then(Value::as_str), 12),
+            target_lang: safe_field(obj.get("target_lang").and_then(Value::as_str), 12),
+        }
+    }
+}
+fn trace_event(model: &Path, trace: &TraceContext, event: &str, detail: &str) {
+    let Some(models) = model.parent() else { return; };
+    let Some(support) = models.parent() else { return; };
+    let log_dir = support.join("Logs");
+    if fs::create_dir_all(&log_dir).is_err() { return; }
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let name = model.file_name().and_then(|x| x.to_str()).unwrap_or("unknown");
+    // Every field is sanitized to avoid log injection and leaking paths.
+    let safe = |s: &str, limit: usize| -> String {
+        if !s.is_empty() && s.len() <= limit && s.bytes().all(|b|
+            b.is_ascii_alphanumeric() || b"_-.:=>".contains(&b)) {
+            s.to_owned()
+        } else { "unknown".to_owned() }
+    };
+    if let Ok(mut file) = File::options().create(true).append(true)
+        .open(log_dir.join("translation-diagnostics.log")) {
+        let _ = writeln!(file,
+            "{seconds} v2 id={} origin={} model={} hash={} detected={} target={} event={} detail={}",
+            trace.id, trace.origin, safe(name, 128), trace.source_hash,
+            trace.source_lang, trace.target_lang, safe(event, 32), safe(detail, 220));
+    }
+}
+fn request_chunk_count(source: &str, whole: bool) -> usize {
+    if whole { return 1; }
+    source.split_inclusive('\n').map(|line| {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if body.trim().is_empty() { 0 } else { split_long_line(body, 1100).len() }
+    }).sum()
 }
 
 fn translation_target(target: &str) -> &str {
@@ -428,10 +486,17 @@ fn whole_document_mode(source: &str, operation: &str, model: &Path) -> bool {
     length <= 3000 && (!has_cjk(source) || length <= 1300)
 }
 
-fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Result<String, String> {
+fn request_local(source: &str, target: &str, operation: &str, model: &str, trace: &TraceContext) -> Result<String, String> {
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
+    let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized_source = normalized_source.trim();
+    // The input hash is a per-launch HMAC from AppKit, NOT an unsalted SHA.
+    // The source and generated content never enter this log.
+    trace_event(&path, trace, "start", &format!("bytes:{}:chars:{}:lines:{}:operation:{}:route:{}",
+        normalized_source.len(), normalized_source.chars().count(),
+        normalized_source.lines().count(), operation, target));
     if translate_gemma_model(&path) {
         gemma_language_codes(target)?;
         if operation != "translate" && operation != "translate_natural" {
@@ -466,10 +531,12 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
     let session = guard.as_ref().ok_or("Движок не запущен")?;
     // Same canonical source handling for the main editor, popup (Cmd+4) and A/B.
     // Preserve paragraph breaks; normalize CRLF from browsers and text editors.
-    let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized_source = normalized_source.trim();
     let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
     let short_specialized_document = whole_document_mode(normalized_source, operation, &path);
+    trace_event(&path, trace, "layout", &format!("mode:{}:chunks:{}:sampling:{}",
+        if short_specialized_document { "whole" } else { "chunked" },
+        request_chunk_count(normalized_source, short_specialized_document),
+        if translate_gemma_model(&path) { "gemma_t0" } else if hy_mt2_model(&path) { "hymt2_t07" } else { "qwen_t01" }));
     let mut output = String::new();
     if short_specialized_document {
         translation_diagnostic(&path, "layout", "единый_контекст");
@@ -495,6 +562,7 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
     translation_diagnostic(&path, "translation", "результат_получен");
+    trace_event(&path, trace, "result", "generated");
     if let Some(editor_path) = editor_path {
         // Load only one big model at a time; replace Hy-MT2 with Qwen for review.
         if let Some(mut previous) = guard.take() {
@@ -508,23 +576,41 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
 }
 
 /// Async ABI: callback on background thread; caller owns returned C string.
-#[no_mangle]
-pub extern "C" fn fl_work_async(text: *const c_char, target: *const c_char,
-    operation: *const c_char, model: *const c_char,
+fn start_async(text: *const c_char, target: *const c_char,
+    operation: *const c_char, model: *const c_char, trace_json: *const c_char,
     done: Option<Completion>, context: *mut c_void) {
     let text = c_arg(text);
     let target = c_arg(target);
     let operation = c_arg(operation);
     let model = c_arg(model);
+    let trace = TraceContext::from_json(&c_arg(trace_json));
     let context_id = context as usize;
     thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(|| request_local(&text, &target, &operation, &model))
+        let began = Instant::now();
+        let outcome = std::panic::catch_unwind(|| request_local(&text, &target, &operation, &model, &trace))
             .unwrap_or_else(|_| Err("Ошибка локального движка".into()));
+        trace_event(Path::new(&model), &trace, "finish", &format!("status:{}:ms:{}",
+            if outcome.is_ok() { "ok" } else { "error" }, began.elapsed().as_millis()));
         let (result, ok) = match outcome { Ok(s) => (s, 1), Err(e) => (e, 0) };
         let ptr = CString::new(result.replace('\0', " ")).expect("NUL removed").into_raw();
         if let Some(callback) = done { callback(ptr, ok, context_id as *mut c_void); }
         else { fl_free_string(ptr); }
     });
+}
+
+#[no_mangle]
+pub extern "C" fn fl_work_async_traced(text: *const c_char, target: *const c_char,
+    operation: *const c_char, model: *const c_char, trace_json: *const c_char,
+    done: Option<Completion>, context: *mut c_void) {
+    start_async(text, target, operation, model, trace_json, done, context);
+}
+
+// Keep the previous FFI symbol for external consumers of the static library.
+#[no_mangle]
+pub extern "C" fn fl_work_async(text: *const c_char, target: *const c_char,
+    operation: *const c_char, model: *const c_char,
+    done: Option<Completion>, context: *mut c_void) {
+    start_async(text, target, operation, model, std::ptr::null(), done, context);
 }
 
 #[no_mangle]
@@ -543,6 +629,29 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn trace_fields_reject_newlines_and_untrusted_strings() {
+        let trace = TraceContext::from_json(r#"{"id":"5b9c-abc","origin":"main\nsource=SECRET","source_hash":"abcdef012345","source_lang":"en","target_lang":"ru"}"#);
+        assert_eq!(trace.id, "5b9c-abc");
+        assert_eq!(trace.origin, "unknown");
+        assert_eq!(trace.source_hash, "abcdef012345");
+        assert_eq!(trace.source_lang, "en");
+        assert_eq!(trace.target_lang, "ru");
+        let fallback = TraceContext::from_json("not JSON");
+        assert_eq!(fallback.id, "unknown");
+        assert_eq!(fallback.source_hash, "unknown");
+    }
+    #[test] fn diagnostic_chunk_count_matches_actual_split() {
+        let short = "Title\nOne sentence.\n\nSecond sentence.";
+        assert_eq!(request_chunk_count(short, true), 1);
+        assert_eq!(request_chunk_count(short, false), 3);
+        let long = "a ".repeat(800);
+        assert!(request_chunk_count(&long, false) >= 2);
+    }
+    #[test] fn canonical_whitespace_preserves_paragraph_structure() {
+        let raw = "\r\nMy Wonderful Family\r\n\r\nTwo brothers.\r\n";
+        let canonical = raw.replace("\r\n", "\n").replace('\r', "\n");
+        assert_eq!(canonical.trim(), "My Wonderful Family\n\nTwo brothers.");
+    }
     #[test] fn whole_document_context_for_short_specialized_texts() {
         let gemma = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
         let hy = Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf");

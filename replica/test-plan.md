@@ -26,3 +26,19 @@
 | T16 | macOS E2E | После завершения перевода открыть и закрыть настройки 10 раз | Нет аварийного завершения | Не выполнено |
 | T17 | macOS E2E | Закрыть и снова открыть главное окно, настройки и окно сравнения | Нет зависаний/крашей | Не выполнено |
 | T18 | macOS E2E | Обновиться с 0.6.8, активная Gemma | Предпочтение модели и загруженные GGUF сохранены | Не выполнено |
+
+## FreeLingo 0.6.10 — вставка и очистка
+| ID | Тип | Действие | Ожидаемый результат | Статус |
+|---|---|---|---|---|
+| T28 | macOS E2E | Скопировать в Safari форматированный текст с жирными заголовками, вставить в главное окно ⌘V | Только текст и переносы строк, никакой RTF/HTML-стилизации | Не выполнено |
+| T29 | macOS E2E | Нажать «Очистить» после перевода | Исходник и результат пусты, история/выбор модели/язык сохранены | Не выполнено |
+| T30 | macOS E2E | Нажать «Очистить» сразу после начала длительного перевода | Поздний callback не восстанавливает результат | Не выполнено |
+
+
+## 0.6.11 trace invariants
+
+- Same short English text pasted in main and selected via Accessibility with TranslateGemma: `hash` and canonical counts identical in same session; `origin` differs; `layout`/`chunks` equal.
+- Different source: different HMAC. After restart: hash changes even for same source. No source/result text or private keys in log.
+- Two consecutive A/B requests: same input HMAC for stages `ab-hy` and `ab-gemma`; unique UUID per stage; language target identical.
+- Unsupported/inconclusive detected language is recorded as `unknown`; user sees an error rather than a misleading successful comparison.
+- Clear while translating: UI remains empty and no stale result returns; backend records completion.

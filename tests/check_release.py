@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.9'
-assert int(plist['CFBundleVersion']) == 19
+assert plist['CFBundleShortVersionString'] == '0.6.11'
+assert int(plist['CFBundleVersion']) == 21
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -148,3 +148,28 @@ assert '@"modelID": @"translategemma-4b"' in main
 assert 'NSString *effectiveMode = natural ? @"translate_natural" : @"translate";' in main
 assert 'FreeLingo.UI settings_open:begin' in main
 print('OK: v0.6.9 context consistency, explicit window retention and UI lifecycle markers')
+
+# v0.6.10: plain-text paste, accessible Clear button and no stale results.
+assert '@interface FLPlainTextView : NSTextView' in main
+assert '[self pasteAsPlainText:sender];' in main
+assert 'text.richText = NO;' in main and 'text.importsGraphics = NO;' in main
+assert 'FLPlainTextView *text = [[FLPlainTextView alloc]' in main
+assert 'FLButton(@"Очистить", self, @selector(clearMain:))' in main
+assert 'if (job.generation != _mainGeneration) return;' in main
+assert 'job.generation = quick ? ++_quickGeneration : ++_mainGeneration;' in main
+assert '++_mainGeneration; // Ignore results' in main
+print('OK: v0.6.10 plain-text editors, one-click clear and stale-result guard')
+
+# v0.6.11: privacy-safe trace linked from AppKit origins to Rust inference.
+assert 'FLPrivateInputFingerprint(' in main and 'CCHmac(kCCHmacAlgSHA256' in main
+assert 'SecRandomCopyBytes(kSecRandomDefault' in main
+assert 'FLCanonicalTranslationSource(' in main
+for origin in ('@"main"', '@"hotkey"', '@"clipboard"', '@"ocr"', '@"ab-hy"', '@"ab-gemma"'):
+    assert origin in main, f'missing trace origin {origin}'
+assert main.count('fl_work_async_traced(') == 2
+assert 'fl_work_async_traced' in (root/'native/FreeLingoCore.h').read_text()
+assert 'TraceContext::from_json' in core and 'request_chunk_count(' in core
+assert 'trace_event(&path, trace, "layout"' in core
+assert '"{seconds} v2 id={} origin={} model={} hash={} detected={} target={} event={} detail={}"' in core
+assert 'if (!keyAvailable)' in main # privacy failure never falls back to unsalted hash
+print('OK: v0.6.11 correlated per-session HMAC diagnostics without text content')

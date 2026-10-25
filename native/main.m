@@ -6,6 +6,8 @@
 #import <Vision/Vision.h>
 #import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonHMAC.h>
+#import <Security/Security.h>
 #import <Sparkle/Sparkle.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <NaturalLanguage/NaturalLanguage.h>
@@ -58,6 +60,42 @@ static NSString *FLSourceLanguage(NSString *text) {
     return [supported containsObject:code] ? code : nil;
 }
 
+// One-session HMAC key: comparable input fingerprints without disclosing user
+// text or letting someone dictionary-attack unsalted hashes of short phrases.
+// Fingerprints deliberately change when FreeLingo restarts.
+static NSString *FLCanonicalTranslationSource(NSString *source) {
+    if (!source) return @"";
+    NSString *unixLines = [[source stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+        stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    return [unixLines stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+static NSString *FLPrivateInputFingerprint(NSString *canonical) {
+    static uint8_t key[32];
+    static BOOL keyAvailable = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keyAvailable = SecRandomCopyBytes(kSecRandomDefault, sizeof(key), key) == errSecSuccess;
+    });
+    if (!keyAvailable) return @"unavailable"; // Never fall back to a public hash.
+    NSData *data = [canonical dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, key, sizeof(key), data.bytes, data.length, digest);
+    NSMutableString *result = [NSMutableString stringWithCapacity:32];
+    for (NSUInteger i = 0; i < 16; i++) [result appendFormat:@"%02x", digest[i]];
+    return result;
+}
+static NSString *FLTraceEnvelope(NSString *canonical, NSString *origin, NSString *sourceLang, NSString *targetLang) {
+    NSDictionary *record = @{
+        @"id": NSUUID.UUID.UUIDString,
+        @"origin": origin ?: @"unknown",
+        @"source_hash": FLPrivateInputFingerprint(canonical),
+        @"source_lang": sourceLang ?: @"unknown",
+        @"target_lang": targetLang ?: @"unknown"
+    };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+    return json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"{}";
+}
+
 static NSInteger FLModelIndexForID(NSString *modelID) {
     for (NSUInteger index = 0; index < FLModels().count; index++) {
         if ([FLModels()[index][@"id"] isEqualToString:modelID]) return (NSInteger)index;
@@ -76,12 +114,22 @@ static NSTextField *FLLabel(NSString *s, CGFloat size) {
     t.textColor = NSColor.secondaryLabelColor;
     return t;
 }
+// Always paste plain text into FreeLingo: never inherit HTML/RTF fonts,
+// colours or background from browsers, documents or other applications.
+@interface FLPlainTextView : NSTextView
+@end
+@implementation FLPlainTextView
+- (void)paste:(id)sender {
+    [self pasteAsPlainText:sender];
+}
+@end
+
 static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
     scroll.autohidesScrollers = YES;
-    NSTextView *text = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
+    FLPlainTextView *text = [[FLPlainTextView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
     text.minSize = NSMakeSize(0, 200);
     text.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
     text.verticallyResizable = YES;
@@ -91,6 +139,8 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
     text.textContainerInset = NSMakeSize(14, 14);
     text.editable = editable;
     text.selectable = YES;
+    text.richText = NO;
+    text.importsGraphics = NO;
     text.font = [NSFont systemFontOfSize:16];
     text.backgroundColor = [NSColor colorWithCalibratedWhite:0.155 alpha:1.0];
     scroll.documentView = text;
@@ -165,6 +215,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
     BOOL _lastTranslationOK;
     BOOL _quickEditTransitioning; // guards rapid/reentrant button activations
     NSUInteger _quickGeneration;
+    NSUInteger _mainGeneration; // Prevent a cleared view from receiving a stale callback.
+    NSString *_quickOrigin; // hotkey/clipboard/ocr/settings, not user text
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *_sessionHistory;
     EventHotKeyRef _translateHotkey;
     EventHotKeyRef _rewriteHotkey;
@@ -315,6 +367,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSButton *saveButton = FLButton(@"Сохранить TXT", self, @selector(saveText:));
     NSButton *settingsButton = FLButton(@"Настройки", self, @selector(showSettings:));
     NSButton *modelsButton = FLButton(@"Модели…", self, @selector(showModels:));
+    // Keep the Clear action above the source editor: the bottom toolbar must
+    // remain usable even when the main window is at its minimum width.
+    NSButton *clearButton = FLButton(@"Очистить", self, @selector(clearMain:));
+    clearButton.toolTip = @"Очистить исходный текст и перевод (история сохранится)";
+    clearButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:clearButton];
     _statusLabel = FLLabel(@"Офлайн · ⌘4 · ⇧⌘2", 12);
     NSStackView *bottom = [NSStackView stackViewWithViews:@[_workButton, copyButton, saveButton, modelsButton, settingsButton, _statusLabel]];
     bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -330,6 +388,9 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [languageLabel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
         [_mainLanguage.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
         [_mainLanguage.leadingAnchor constraintEqualToAnchor:languageLabel.trailingAnchor constant:12],
+        [clearButton.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
+        [clearButton.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
+        [clearButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:_mainLanguage.trailingAnchor constant:12],
         [columns.topAnchor constraintEqualToAnchor:languageLabel.bottomAnchor constant:16],
         [columns.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
         [columns.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
@@ -425,7 +486,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     if ([NSFileManager.defaultManager fileExistsAtPath:file.path])
         [NSWorkspace.sharedWorkspace openURL:file];
     else
-        [self presentMessage:@"Журнал появится после нового перевода. Исходный текст в него не записывается."];
+        [self presentMessage:@"Журнал появится после нового перевода. Содержимое текста не сохраняется. Отпечатки действуют до перезапуска FreeLingo."];
 }
 
 - (void)runComparisonStage:(NSInteger)stage {
@@ -459,8 +520,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *effectiveMode = natural ? @"translate_natural" : @"translate";
     job.mode = effectiveMode;
     job.comparisonStage = stage;
-    fl_work_async(_comparisonSource.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
-        FLModelURL(idx).path.UTF8String, FLRustCallback, (__bridge_retained void *)job);
+    NSString *input = FLCanonicalTranslationSource(_comparisonSource);
+    NSString *sourceLang = FLSourceLanguage(input);
+    NSString *trace = FLTraceEnvelope(input, stage == 1 ? @"ab-hy" : @"ab-gemma",
+                                       sourceLang, _comparisonTarget);
+    fl_work_async_traced(input.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
+        FLModelURL(idx).path.UTF8String, trace.UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)compareTranslations:(id)sender {
@@ -482,7 +547,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [self presentMessage:@"Для сравнения скачай обе модели: Hy-MT2 7B и TranslateGemma 4B."];
         return;
     }
-    _comparisonSource = [text copy];
+    _comparisonSource = FLCanonicalTranslationSource(text);
     _comparisonTarget = FLSelectedLanguage(_mainLanguage);
     if (![@[@"ru", @"en", @"zh", @"fr", @"it"] containsObject:_comparisonTarget]) {
         [self presentMessage:@"Сравнение доступно для русского, английского, китайского, французского и итальянского."];
@@ -650,10 +715,11 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [self presentMessage:@"Приложение не предоставило выделенный текст через Accessibility. Выдели текст в TextEdit или скопируй его и выбери «Перевести буфер обмена» в меню FreeLingo."];
         return;
     }
-    [self showQuickForText:source mode:mode];
+    [self showQuickForText:source mode:mode origin:@"hotkey"];
 }
 
-- (void)showQuickForText:(NSString *)source mode:(NSString *)mode {
+- (void)showQuickForText:(NSString *)source mode:(NSString *)mode origin:(NSString *)origin {
+    _quickOrigin = [origin copy];
     [self finishQuickEditing];
     _currentQuickSource = [source copy];
     _currentQuickResult = @"";
@@ -692,7 +758,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     job.source = [text copy];
     job.mode = [mode copy];
     job.quick = quick;
-    job.generation = quick ? ++_quickGeneration : 0;
+    job.generation = quick ? ++_quickGeneration : ++_mainGeneration;
     if (quick) { _quickEditButton.enabled = NO; _quickEditor.string = @"Обрабатываю локальной моделью…"; }
     else { _resultEditor.string = @"Обрабатываю локальной моделью…"; _workButton.enabled = NO; }
     // Select a style preset without changing the UI's logical translate mode
@@ -710,7 +776,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSString *targetArgument = language;
     if ([FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"] &&
         [effectiveMode hasPrefix:@"translate"]) {
-        NSString *detected = FLSourceLanguage(text);
+        NSString *detected = FLSourceLanguage(FLCanonicalTranslationSource(text));
         if (!detected || [detected isEqualToString:language]) {
             [self presentMessage:@"TranslateGemma: не удалось определить исходный язык или он совпадает с целевым. Попробуй более длинный текст на другом языке."];
             if (quick) _quickEditor.string = @"Не удалось определить исходный язык.";
@@ -719,8 +785,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
         }
         targetArgument = [NSString stringWithFormat:@"%@>%@", detected, language];
     }
-    fl_work_async(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String, model.UTF8String,
-                  FLRustCallback, (__bridge_retained void *)job);
+    NSString *input = FLCanonicalTranslationSource(text);
+    NSString *detectedLanguage = FLSourceLanguage(input);
+    NSString *origin = quick ? (_quickOrigin ?: @"hotkey") : @"main";
+    NSString *trace = FLTraceEnvelope(input, origin, detectedLanguage, language);
+    fl_work_async_traced(input.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
+                        model.UTF8String, trace.UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
@@ -748,6 +818,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         _quickEditButton.enabled = ok && _currentQuickResult.length > 0;
         _replaceButton.enabled = ok && (_originElement != NULL) && ([_originSelection isEqualToString:job.source]);
     } else {
+        if (job.generation != _mainGeneration) return; // cleared or superseded
         _resultEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
         _workButton.enabled = YES;
         _statusLabel.stringValue = ok ? @"Перевод выполнен на Mac" : @"Ошибка движка. Открой «Модели» или проверь журнал.";
@@ -756,6 +827,17 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [_sessionHistory insertObject:@{ @"source": job.source, @"result": result } atIndex:0];
         if (_sessionHistory.count > 50) [_sessionHistory removeLastObject];
     }
+}
+
+- (void)clearMain:(id)sender {
+    (void)sender;
+    ++_mainGeneration; // Ignore results from translations already in flight.
+    _sourceEditor.string = @"";
+    _resultEditor.string = @"";
+    _workButton.enabled = YES;
+    _statusLabel.stringValue = @"Поля очищены";
+    [_mainWindow makeFirstResponder:_sourceEditor];
+    // Do not change translation history, the selected model or the language.
 }
 
 - (void)translateMain:(id)sender {
@@ -969,7 +1051,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [self forgetSelection];
     NSString *clip = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
     if (!clip.length) { [self presentMessage:@"В буфере обмена нет текста."]; return; }
-    [self showQuickForText:clip mode:@"translate"];
+    [self showQuickForText:clip mode:@"translate" origin:@"clipboard"];
 }
 
 - (void)startOCR:(id)sender {
@@ -1003,7 +1085,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [NSFileManager.defaultManager removeItemAtPath:file error:nil];
         NSString *text = [lines componentsJoinedByString:@"\n"];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (text.length) [self showQuickForText:text mode:@"translate"];
+            if (text.length) [self showQuickForText:text mode:@"translate" origin:@"ocr"];
             else [self presentMessage:@"Текст на выбранном участке не найден или недоступно распознавание."];
         });
     });
