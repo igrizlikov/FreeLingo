@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.4 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.5 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -210,9 +210,21 @@ fn hy_target_name(target: &str) -> Option<&'static str> {
 
 // As recommended in Tencent's Hy-MT2 model card: user-only instruction,
 // without a generic system prompt or Qwen-specific /no_think directive.
-fn hy_mt2_prompt(source: &str, target: &str, retry: bool) -> Result<String, String> {
+// Hy-MT2 has an official instruction template for STYLE, separate from the
+// default translation template. Do not ask the specialized translator to be a
+// general-purpose rewriting agent, or append Qwen-specific thinking directives.
+// Preserve the plain mode for repeatable side-by-side A/B comparisons.
+fn hy_mt2_prompt(source: &str, target: &str, natural: bool, retry: bool) -> Result<String, String> {
     let language = hy_target_name(target).ok_or_else(||
         "Hy-MT2 не поддерживает выбранный язык в FreeLingo. Для этого языка выбери Qwen3.".to_string())?;
+    if natural && target == "ru" {
+        let style = if retry {
+            "idiomatic, grammatically impeccable modern Russian suitable for a personal narrative; avoid literal English calques and unnatural verb-noun combinations; favor fluent native Russian sentence structure; faithfully preserve every fact, quantity, family relation, profession, tense and paragraph"
+        } else {
+            "natural, fluent contemporary Russian prose, suitable for a short personal story; idiomatic collocations rather than word-for-word calques; preserve the original meaning, facts, quantity, family relations, tone and paragraph structure"
+        };
+        return Ok(format!("Please translate the following text into {language}. Note that the translation style must strictly conform to [{style}]. Output only the translated result, without explanations:\n\n{source}"));
+    }
     let advice = if retry {
         " Preserve all numbers, plurality, professions, names and relationships; use natural wording."
     } else { "" };
@@ -222,10 +234,10 @@ fn hy_mt2_prompt(source: &str, target: &str, retry: bool) -> Result<String, Stri
 // Return per-model request data, separated from HTTP for deterministic tests.
 fn make_payload(source: &str, target: &str, operation: &str, model: &Path, attempt: usize) -> Result<Value, String> {
     if hy_mt2_model(model) {
-        if operation != "translate" {
+        if operation != "translate" && operation != "translate_natural" {
             return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
         }
-        let user_prompt = hy_mt2_prompt(source, target, attempt > 0)?;
+        let user_prompt = hy_mt2_prompt(source, target, operation == "translate_natural", attempt > 0)?;
         Ok(json!({
             "model": "freelingo", "stream": false,
             "temperature": 0.7, "top_p": 0.6, "top_k": 20,
@@ -234,6 +246,9 @@ fn make_payload(source: &str, target: &str, operation: &str, model: &Path, attem
         }))
     } else {
         let mut instruction = system_prompt(target, operation);
+        if operation == "translate_natural" && target == "ru" {
+            instruction.push_str(" Write polished, natural Russian as a native editor would: no calques or awkward combinations of verbs and nouns. Preserve source meaning exactly, including numbers and relations. Do not add details.");
+        }
         if attempt > 0 {
             instruction.push_str(" Carefully recheck counts, professions, family relations, and target language. Do not omit anything; produce the complete answer.");
         }
@@ -286,7 +301,7 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
     let path = PathBuf::from(model);
     // Validate model-specific capabilities before loading multi-GB GGUF into memory.
     if hy_mt2_model(&path) {
-        if operation != "translate" {
+        if operation != "translate" && operation != "translate_natural" {
             return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
         }
         hy_target_name(target).ok_or_else(||
@@ -381,6 +396,24 @@ mod tests {
         assert_eq!(json["messages"][0]["role"], "user");
         assert!(json["messages"][0]["content"].as_str().unwrap().contains("into Russian"));
         assert!(!json.to_string().contains("/no_think"));
+    }
+    #[test] fn natural_style_uses_official_hy_style_template() {
+        let path = Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf");
+        let natural = make_payload("I was born last.", "ru", "translate_natural", path, 0).unwrap();
+        let content = natural["messages"][0]["content"].as_str().unwrap();
+        assert!(content.contains("translation style must strictly conform"));
+        assert!(content.contains("idiomatic collocations"));
+        assert!(content.contains("facts, quantity, family relations"));
+        assert_eq!(natural["messages"].as_array().unwrap().len(), 1);
+        let ordinary = make_payload("I was born last.", "ru", "translate", path, 0).unwrap();
+        assert_ne!(natural["messages"][0]["content"], ordinary["messages"][0]["content"]);
+        assert!(!ordinary["messages"][0]["content"].as_str().unwrap().contains("style must strictly conform"));
+    }
+    #[test] fn natural_style_is_ignored_for_non_russian_targets() {
+        let path = Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf");
+        let j = make_payload("Bonjour!", "it", "translate_natural", path, 0).unwrap();
+        assert!(j["messages"][0]["content"].as_str().unwrap().contains("into Italian"));
+        assert!(!j["messages"][0]["content"].as_str().unwrap().contains("Russian prose"));
     }
     #[test] fn hy_rewrite_rejected() {
         assert!(make_payload("Привет", "ru", "rewrite", Path::new("Hy-MT2-7B-Q4_K_M.gguf"), 0).is_err());

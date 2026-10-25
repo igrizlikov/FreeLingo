@@ -121,6 +121,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *_dockMenuItem;
     NSMenuItem *_loginMenuItem;
     NSMenuItem *_updateMenuItem;
+    NSMenuItem *_naturalTranslationItem;
     NSTextView *_sourceEditor;
     NSTextView *_resultEditor;
     NSTextView *_quickEditor;
@@ -164,7 +165,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _sessionHistory = [NSMutableArray new];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         @"modelID": @"qwen3-4b", @"languageIndex": @0,
-        @"showDockIcon": @NO
+        @"showDockIcon": @NO, @"naturalRussianTranslation": @YES
     }];
     [self createApplicationMenu];
     [self createMainWindow];
@@ -379,6 +380,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *ocr = [[NSMenuItem alloc] initWithTitle:@"Текст с экрана  ⇧⌘2" action:@selector(startOCR:) keyEquivalent:@""];
     ocr.target = self; [menu addItem:ocr];
     [menu addItem:NSMenuItem.separatorItem];
+    _naturalTranslationItem = [[NSMenuItem alloc] initWithTitle:@"Естественный русский перевод" action:@selector(toggleNaturalTranslation:) keyEquivalent:@""];
+    _naturalTranslationItem.target = self;
+    _naturalTranslationItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:_naturalTranslationItem];
     NSMenuItem *models = [[NSMenuItem alloc] initWithTitle:@"Выбрать и скачать модель…" action:@selector(showModels:) keyEquivalent:@""];
     models.target = self; [menu addItem:models];
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Настройки…" action:@selector(showSettings:) keyEquivalent:@""];
@@ -397,6 +402,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@""];
     [menu addItem:quit];
     _statusItem.menu = menu;
+}
+
+- (void)toggleNaturalTranslation:(id)sender {
+    (void)sender;
+    BOOL enabled = [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"];
+    [NSUserDefaults.standardUserDefaults setBool:!enabled forKey:@"naturalRussianTranslation"];
+    _naturalTranslationItem.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 // Accessory mode has no Dock icon but keeps status item, hotkeys and windows.
@@ -571,7 +583,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
     job.generation = quick ? ++_quickGeneration : 0;
     if (quick) { _quickEditButton.enabled = NO; _quickEditor.string = @"Обрабатываю локальной моделью…"; }
     else { _resultEditor.string = @"Обрабатываю локальной моделью…"; _workButton.enabled = NO; }
-    fl_work_async(text.UTF8String, language.UTF8String, mode.UTF8String, model.UTF8String,
+    // Select a style preset without changing the UI's logical translate mode
+    // (used by popup lifecycle guards). Other target languages remain unchanged.
+    NSString *effectiveMode = mode;
+    if ([mode isEqualToString:@"translate"] && [language isEqualToString:@"ru"] &&
+        [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"]) {
+        effectiveMode = @"translate_natural";
+    }
+    fl_work_async(text.UTF8String, language.UTF8String, effectiveMode.UTF8String, model.UTF8String,
                   FLRustCallback, (__bridge_retained void *)job);
 }
 
@@ -883,7 +902,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     (void)sender;
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Настройки FreeLingo";
-    alert.informativeText = @"Все модели работают локально. Для скачивания и переключения нажми «Модели…» в основном окне.";
+    alert.informativeText = @"Все модели работают локально. Для скачивания и переключения нажми «Модели…». Стиль перевода на русский переключается в меню FreeLingo в строке меню macOS.";
     NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 232)];
     NSArray<NSString *> *names = @[@"Перевести выделение", @"Улучшить текст", @"OCR области экрана"];
     NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray new];

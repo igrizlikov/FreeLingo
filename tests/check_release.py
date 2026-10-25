@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.4'
-assert int(plist['CFBundleVersion']) == 14
+assert plist['CFBundleShortVersionString'] == '0.6.5'
+assert int(plist['CFBundleVersion']) == 15
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, target)' in core
@@ -93,3 +93,11 @@ print('OK: Hy-MT2 models, sources, sha256 hashes, model-specific prompt/sampling
 
 assert (root / 'tests' / 'smoke_hy_macos.py').is_file()
 print('OK: offline Hy-MT2 macOS smoke test included (not executed on Linux)')
+
+# 0.6.5: native idiomatic Russian preset through official Hy-MT2 style templates.
+assert 'naturalRussianTranslation' in main
+assert 'toggleNaturalTranslation:' in main
+assert 'translate_natural' in core and 'translate_natural' in main
+assert 'translation style must strictly conform' in core
+assert 'natural_style_uses_official_hy_style_template' in core
+print('OK: opt-in A/B comparison between natural and standard Russian translation')
