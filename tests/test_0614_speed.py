@@ -19,5 +19,5 @@ for name in ('twelve_b_short_story_over_three_thousand_chars_uses_one_request',
     assert name in s
 assert '"--ctx-size", "6144", "--n-gpu-layers", "99"' in s, 'Metal offload accidentally changed'
 assert '"temperature": 0.0, "max_tokens": 2800' in s, 'Sampling intentionally unchanged'
-assert (r/'assets/Info.plist').read_text().count('0.6.14')==1
+assert (r/'assets/Info.plist').read_text().count('0.6.15')==1
 print('OK 0.6.14: 12B batching, original sampling, Metal settings, performance timing')

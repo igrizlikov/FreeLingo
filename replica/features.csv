@@ -33,3 +33,5 @@ F31,TranslateGemma 12B model selection and A-B,Models,must,partial,User screensh
 
 source_language_override,"Выбор исходного языка для коротких текстов",translation,must,untested,"native/main.m; tests/check_release.py","Авто или явный язык в основном и быстром окне; требуется сборка и тест на Mac"
 F32,TranslateGemma 12B fewer inference requests and timings,Rust inference,must,untested,0.6.14 code and Rust unit tests; CPU available only on CI,Measure speed and translation coherence for 3000-8000 character originals on real Mac
+
+F33,TranslateGemma 12B streaming display,Rust/AppKit,should,untested,0.6.15 source SSE parser and callback source only,Requires macOS CI compile and UI testing incl clear/replace/error cases

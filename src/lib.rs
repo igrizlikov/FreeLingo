@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.14 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.15 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -6,7 +6,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -158,6 +158,72 @@ fn curl_request(url: &str, token: &str, body: Option<&str>, secs: &str) -> Resul
         return Err(format!("Локальная модель недоступна: {} {}", stderr.trim(), body.trim().chars().take(250).collect::<String>()));
     }
     serde_json::from_slice(&output.stdout).map_err(|e| format!("Неверный ответ движка: {e}"))
+}
+
+
+// Chat completions streamed as OpenAI-compatible SSE. A partial string is
+// display-only: the final response still passes all translation quality checks.
+// No source or generated text is written to diagnostic logs.
+fn sse_delta(data: &Value) -> Option<&str> {
+    data.pointer("/choices/0/delta/content").and_then(Value::as_str)
+}
+
+fn curl_stream_request(session: &Backend, payload: &Value,
+    mut partial: impl FnMut(&str)) -> Result<(String, bool, Option<Value>, u128), String> {
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", session.port);
+    let mut streaming = payload.clone();
+    streaming["stream"] = json!(true);
+    let mut child = Command::new("/usr/bin/curl")
+        .args(["--silent", "--show-error", "--fail-with-body", "--no-buffer",
+               "--noproxy", "*", "--connect-timeout", "2", "--max-time", "240",
+               "--header", "Content-Type: application/json", "--header",
+               &format!("Authorization: Bearer {}", session.token),
+               "--request", "POST", "--data-binary", "@-", &url])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|_| "Не удалось запустить потоковый HTTP-клиент".to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(streaming.to_string().as_bytes())
+            .map_err(|_| "Не удалось отправить запрос модели".to_string())?;
+    }
+    let stdout = child.stdout.take().ok_or("Нет ответа локального движка")?;
+    let mut answer = String::new();
+    let started = Instant::now();
+    let mut first_token_ms = None;
+    let mut last_emit = Instant::now();
+    let mut truncated = false;
+    let mut timings = None;
+    let mut error = false;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|_| "Ошибка чтения потока перевода".to_string())?;
+        let Some(data) = line.strip_prefix("data:") else { continue; };
+        let data = data.trim();
+        if data == "[DONE]" { continue; }
+        let Ok(event) = serde_json::from_str::<Value>(data) else { continue; };
+        if event.get("error").is_some() { error = true; break; }
+        if let Some(token) = sse_delta(&event) {
+            if !token.is_empty() {
+                if first_token_ms.is_none() { first_token_ms = Some(started.elapsed().as_millis()); }
+                answer.push_str(token);
+                // Throttle UI updates: streaming a 12B translation may produce
+                // hundreds of small deltas per second.
+                if last_emit.elapsed() >= Duration::from_millis(120) {
+                    partial(&answer);
+                    last_emit = Instant::now();
+                }
+            }
+        }
+        if event.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+            truncated = true;
+        }
+        if let Some(meta) = event.get("timings") { timings = Some(meta.clone()); }
+    }
+    // Reap curl even if a truncated or failed response was received.
+    let status = child.wait().map_err(|_| "Ошибка завершения HTTP-клиента".to_string())?;
+    if !status.success() || error || answer.trim().is_empty() {
+        return Err("Потоковый режим локального движка не ответил".to_string());
+    }
+    partial(&answer);
+    Ok((answer, truncated, timings, first_token_ms.unwrap_or(0)))
 }
 
 fn start_server(model: &Path) -> Result<Backend, String> {
@@ -408,7 +474,8 @@ fn plain_answer(value: &str) -> String {
     text.to_owned()
 }
 
-fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str, trace: &TranslationTrace, chunk_index: usize) -> Result<String, String> {
+fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str, trace: &TranslationTrace,
+    chunk_index: usize, prefix: &str, progress: Option<&dyn Fn(&str)>) -> Result<String, String> {
     let mut previous_error = "Модель вернула некачественный результат".to_owned();
     for attempt in 0..3 {
         let payload = make_payload(source, target, operation, &session.model, attempt)?;
@@ -422,24 +489,41 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str,
             payload.get("max_tokens").map(|v| v.to_string()).unwrap_or_else(|| "default".into()));
         trace.log(&session.model, "sampling", &sampling);
         let started = Instant::now();
-        let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
-            &session.token, Some(&payload.to_string()), "240")?;
-        let timings = answer.get("timings");
+        // Stream only TranslateGemma 12B in interactive UI. Keep Hy-MT2,
+        // Qwen and A/B comparison on the validated non-streaming path.
+        let can_stream = translate_gemma_12b_model(&session.model) && progress.is_some();
+        let stream_answer = if can_stream {
+            curl_stream_request(session, &payload, |fragment| {
+                if let Some(progress) = progress { progress(&format!("{prefix}{fragment}")); }
+            }).ok()
+        } else { None };
+        if can_stream && stream_answer.is_none() {
+            // Resume with known-good non-streaming API if SSE is unavailable.
+            trace.log(&session.model, "stream_fallback", &format!("chunk={} attempt={}", chunk_index, attempt + 1));
+        }
+        let (result, truncated, timing_values, ttft_ms) = if let Some((text, cut, timings, ttft)) = stream_answer {
+            (plain_answer(&text), cut, timings, ttft.to_string())
+        } else {
+            let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
+                &session.token, Some(&payload.to_string()), "240")?;
+            if answer.get("error").is_some() {
+                return Err("Локальный движок вернул ошибку".to_string());
+            }
+            let result = answer.pointer("/choices/0/message/content").and_then(Value::as_str)
+                .ok_or("Движок не вернул текст")?;
+            (plain_answer(result), answer.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length"),
+                answer.get("timings").cloned(), "na".into())
+        };
         let timing = |key: &str| -> String {
-            timings.and_then(|t| t.get(key))
+            timing_values.as_ref().and_then(|t| t.get(key))
                 .and_then(|v| if v.is_number() { Some(v.to_string()) } else { None })
                 .unwrap_or_else(|| "na".to_owned())
         };
-        // Only counters and timings, NEVER prompts, results or response bodies.
+        // Only counts, timing and streaming state; never response contents.
         trace.log(&session.model, "perf", &format!(
-            "chunk={} attempt={} wall_ms={} prompt_n={} prompt_ms={} predicted_n={} predicted_ms={}",
-            chunk_index, attempt + 1, started.elapsed().as_millis(),
-            timing("prompt_n"), timing("prompt_ms"), timing("predicted_n"), timing("predicted_ms")));
-        if let Some(err) = answer.get("error") { return Err(err.to_string()); }
-        let result = answer.pointer("/choices/0/message/content").and_then(Value::as_str)
-            .ok_or("Движок не вернул текст")?;
-        let result = plain_answer(result);
-        let truncated = answer.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length");
+            "chunk={} attempt={} wall_ms={} ttft_ms={} streamed={} prompt_n={} prompt_ms={} predicted_n={} predicted_ms={}",
+            chunk_index, attempt + 1, started.elapsed().as_millis(), ttft_ms,
+            can_stream && ttft_ms != "na", timing("prompt_n"), timing("prompt_ms"), timing("predicted_n"), timing("predicted_ms")));
         let problem = quality_issue(source, &result, translation_target(target));
         if !truncated && problem.is_none() { return Ok(result); }
         previous_error = if truncated { "Ответ модели обрезан".into() }
@@ -580,7 +664,8 @@ fn packed_translation_batches(source: &str) -> Vec<(String, String)> {
     batches
 }
 
-fn request_local(source: &str, target: &str, operation: &str, model: &str, source_language: &str, trace: &TranslationTrace) -> Result<String, String> {
+fn request_local(source: &str, target: &str, operation: &str, model: &str, source_language: &str,
+    trace: &TranslationTrace, progress: Option<&dyn Fn(&str)>) -> Result<String, String> {
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
@@ -649,15 +734,17 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
         // Whole-document context is essential to resolve kinship, chronology,
         // pronouns and idioms in a short story. This also eliminates separate
         // model invocations caused by hard line breaks in the source editor.
-        output = request_chunk(session, normalized_source, target, translate_mode, trace, 1)?;
+        output = request_chunk(session, normalized_source, target, translate_mode, trace, 1, &output, progress)?;
     } else if let Some(batches) = packed {
         let mut chunk_index = 0;
         for (text, separator) in batches {
             if !text.trim().is_empty() {
                 chunk_index += 1;
-                output.push_str(&request_chunk(session, &text, target, translate_mode, trace, chunk_index)?);
+                let translated = request_chunk(session, &text, target, translate_mode, trace, chunk_index, &output, progress)?;
+                output.push_str(&translated);
             }
             output.push_str(&separator);
+            if let Some(progress) = progress { progress(&output); }
         }
     } else {
         let mut chunk_index = 0;
@@ -670,10 +757,12 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
             for (index, part) in parts.iter().enumerate() {
                 if index > 0 { output.push(' '); }
                 chunk_index += 1;
-                output.push_str(&request_chunk(session, part, target, translate_mode, trace, chunk_index)?);
+                let translated = request_chunk(session, part, target, translate_mode, trace, chunk_index, &output, progress)?;
+                output.push_str(&translated);
             }
         }
         output.push_str(separator);
+        if let Some(progress) = progress { progress(&output); }
         }
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
@@ -711,7 +800,19 @@ pub extern "C" fn fl_work_async_diagnostic(text: *const c_char, target: *const c
     let trace = TranslationTrace::new(&text, &origin);
     let context_id = context as usize;
     thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(|| request_local(&text, &target, &operation, &model, &source_language, &trace))
+        let send_partial = |partial: &str| {
+            // Completion status 2 is display-only; the AppKit callback keeps
+            // the job context alive until the terminal status 0/1 arrives.
+            if let Some(callback) = done {
+                let ptr = CString::new(partial.replace('\0', " ")).expect("NUL removed").into_raw();
+                callback(ptr, 2, context_id as *mut c_void);
+            }
+        };
+        let may_stream = done.is_some() && matches!(trace.origin, "main" | "hotkey" | "hotkey_clipboard" | "clipboard")
+            && model.contains("translategemma-12b");
+        let progress = if may_stream { Some(&send_partial as &dyn Fn(&str)) } else { None };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            request_local(&text, &target, &operation, &model, &source_language, &trace, progress)))
             .unwrap_or_else(|_| Err("Ошибка локального движка".into()));
         let (result, ok) = match outcome { Ok(s) => (s, 1), Err(e) => (e, 0) };
         if ok == 0 { trace.log(Path::new(&model), "translation", "status=error"); }
@@ -746,6 +847,14 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_delta_parser_reads_utf8_fragments_and_skips_usage() {
+        let event = json!({"choices":[{"delta":{"content":"Привет, мир!"},"finish_reason":null}]});
+        assert_eq!(sse_delta(&event), Some("Привет, мир!"));
+        assert_eq!(sse_delta(&json!({"choices":[]})), None);
+        assert_eq!(sse_delta(&json!({"choices":[{"delta":{"role":"assistant"}}]})), None);
+    }
 
     #[test]
     fn twelve_b_short_story_over_three_thousand_chars_uses_one_request() {

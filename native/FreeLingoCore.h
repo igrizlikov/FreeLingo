@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 // Callback is invoked on a background thread; caller must dispatch UI updates to main.
+// success=2 delivers provisional streaming text (context remains owned by Rust caller).
+// success=0/1 ends the request and consumes the retained callback context.
 typedef void (*fl_completion)(char *result, int success, void *context);
 void fl_work_async(const char *text, const char *target, const char *operation,
                    const char *model, fl_completion done, void *context);

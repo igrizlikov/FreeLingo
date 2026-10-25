@@ -183,6 +183,7 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
 @interface FLAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDownloadDelegate, NSTextViewDelegate>
 - (void)hotkey:(UInt32)identifier;
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job;
+- (void)translationProgress:(NSString *)partial job:(FLJob *)job;
 @end
 
 static OSStatus FLHotkeyHandler(EventHandlerCallRef _unused, EventRef event, void *userData) {
@@ -197,12 +198,17 @@ static OSStatus FLHotkeyHandler(EventHandlerCallRef _unused, EventRef event, voi
 }
 
 static void FLRustCallback(char *raw, int success, void *context) {
-    FLJob *job = (__bridge_transfer FLJob *)context;
+    // Status 2: streaming update, do NOT consume the retained FFI context.
+    // Status 0/1: terminal callback, transfer and release the context exactly once.
+    FLJob *job;
+    if (success == 2) job = (__bridge FLJob *)context;
+    else job = (__bridge_transfer FLJob *)context;
     NSString *answer = raw ? [NSString stringWithUTF8String:raw] : @"Ошибка обработки";
     if (raw) fl_free_string(raw);
     if (!answer) answer = @"Ошибка кодировки";
     dispatch_async(dispatch_get_main_queue(), ^{
-        [job.controller translationFinished:answer success:(success != 0) job:job];
+        if (success == 2) [job.controller translationProgress:answer job:job];
+        else [job.controller translationFinished:answer success:(success != 0) job:job];
     });
 }
 
@@ -239,6 +245,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     BOOL _quickEditTransitioning; // guards rapid/reentrant button activations
     NSUInteger _quickGeneration;
     NSUInteger _mainGeneration; // Prevent a cleared view from receiving a stale callback.
+    BOOL _mainTranslating; // Disallow saving/copying provisional streaming output.
     NSUInteger _selectionCaptureGeneration; // Supersede pending hotkey clipboard probes.
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *_sessionHistory;
     EventHotKeyRef _translateHotkey;
@@ -904,9 +911,32 @@ static void FLRustCallback(char *raw, int success, void *context) {
         targetArgument = [NSString stringWithFormat:@"%@>%@", sourceLanguage, language];
     }
     NSString *origin = quick ? (_quickOrigin ?: @"hotkey") : @"main";
+    if (!quick) {
+        _mainTranslating = YES;
+        _resultEditor.editable = NO; // Prevent user edits from being overwritten by SSE updates.
+    }
     sourceLanguage = sourceLanguage ?: @"unknown";
     fl_work_async_diagnostic(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
         model.UTF8String, origin.UTF8String, sourceLanguage.UTF8String, FLRustCallback, (__bridge_retained void *)job);
+}
+
+// Streaming output is provisional and is never committed to history or the
+// Replace action. Generation guards protect cleared/superseded text and popups.
+- (void)translationProgress:(NSString *)partial job:(FLJob *)job {
+    if (job.comparisonStage > 0 || !partial.length) return;
+    if (job.quick) {
+        if (job.generation != _quickGeneration || _quickEditor.editable ||
+            ![_currentQuickSource isEqualToString:job.source] ||
+            ![_currentQuickMode isEqualToString:job.mode]) return;
+        _quickEditor.string = partial;
+        _lastTranslationOK = NO;
+        _quickEditButton.enabled = NO;
+        _replaceButton.enabled = NO;
+    } else {
+        if (job.generation != _mainGeneration) return;
+        _resultEditor.string = partial;
+        _statusLabel.stringValue = @"Перевод идёт…";
+    }
 }
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
@@ -937,6 +967,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
     } else {
         if (job.generation != _mainGeneration) return; // cleared or superseded
         _resultEditor.string = ok ? result : [@"Ошибка: " stringByAppendingString:result];
+        _mainTranslating = NO;
+        _resultEditor.editable = YES;
         _workButton.enabled = YES;
         _statusLabel.stringValue = ok ? @"Перевод выполнен на Mac" : @"Ошибка движка. Открой «Модели» или проверь журнал.";
     }
@@ -949,6 +981,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
 - (void)clearMain:(id)sender {
     (void)sender;
     ++_mainGeneration; // Ignore results from translations already in flight.
+    _mainTranslating = NO;
+    _resultEditor.editable = YES;
     _sourceEditor.string = @"";
     _resultEditor.string = @"";
     _workButton.enabled = YES;
@@ -1071,6 +1105,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 }
 - (void)copyMain:(id)sender {
     (void)sender;
+    if (_mainTranslating) return; // Never copy an unfinished streaming translation.
     if (_resultEditor.string.length) {
         NSPasteboard *pb = NSPasteboard.generalPasteboard;
         [pb clearContents]; [pb setString:_resultEditor.string forType:NSPasteboardTypeString];
@@ -1237,6 +1272,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 - (void)saveText:(id)sender {
     (void)sender;
+    if (_mainTranslating) return; // Do not export a provisional translation.
     if (!_resultEditor.string.length) return;
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.nameFieldStringValue = @"FreeLingo-translation.txt";
