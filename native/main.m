@@ -8,6 +8,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <Sparkle/Sparkle.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <NaturalLanguage/NaturalLanguage.h>
 #include "ModelManager.inc"
 #import "FreeLingoCore.h"
 
@@ -43,6 +44,27 @@ static NSString *FLSelectedLanguage(NSPopUpButton *picker) {
     NSInteger idx = picker.indexOfSelectedItem;
     return (idx >= 0 && idx < (NSInteger)FLLanguageCodes().count) ? FLLanguageCodes()[(NSUInteger)idx] : @"ru";
 }
+// TranslateGemma requires an explicit source language. Detect locally with
+// Apple's NaturalLanguage framework (no network requests). Reject uncertainty.
+static NSString *FLSourceLanguage(NSString *text) {
+    if (!text.length) return nil;
+    NLLanguageRecognizer *recognizer = [NLLanguageRecognizer new];
+    [recognizer processString:text];
+    NSString *code = recognizer.dominantLanguage;
+    if (!code.length) return nil;
+    if ([code hasPrefix:@"zh"]) code = @"zh";
+    else if ([code containsString:@"-"]) code = [code componentsSeparatedByString:@"-"].firstObject;
+    NSSet *supported = [NSSet setWithArray:@[@"ru", @"en", @"zh", @"fr", @"it"]];
+    return [supported containsObject:code] ? code : nil;
+}
+
+static NSInteger FLModelIndexForID(NSString *modelID) {
+    for (NSUInteger index = 0; index < FLModels().count; index++) {
+        if ([FLModels()[index][@"id"] isEqualToString:modelID]) return (NSInteger)index;
+    }
+    return -1;
+}
+
 static NSButton *FLButton(NSString *title, id target, SEL action) {
     NSButton *b = [NSButton buttonWithTitle:title target:target action:action];
     b.bezelStyle = NSBezelStyleRounded;
@@ -83,6 +105,7 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
 @property (nonatomic, copy) NSString *mode;
 @property (nonatomic, assign) BOOL quick;
 @property (nonatomic, assign) NSUInteger generation;
+@property (nonatomic, assign) NSInteger comparisonStage;
 @end
 @implementation FLJob
 @end
@@ -147,6 +170,15 @@ static void FLRustCallback(char *raw, int success, void *context) {
     EventHotKeyRef _rewriteHotkey;
     EventHotKeyRef _ocrHotkey;
     EventHandlerRef _hotkeyHandler;
+    NSWindow *_settingsWindow;
+    NSRunningApplication *_settingsPreviousApp;
+    NSButton *_settingsDockCheckbox;
+    NSButton *_settingsLoginCheckbox;
+    NSButton *_settingsNaturalCheckbox;
+    NSButton *_settingsLiteraryCheckbox;
+    NSPopUpButton *_settingsShortcut0;
+    NSPopUpButton *_settingsShortcut1;
+    NSPopUpButton *_settingsShortcut2;
     NSWindow *_modelsWindow;
     NSPopUpButton *_modelPicker;
     NSTextField *_modelStatus;
@@ -159,6 +191,12 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSURLSessionDownloadTask *_modelTask;
     NSInteger _downloadingModelIndex;
     BOOL _verifyingModel;
+    NSWindow *_comparisonWindow;
+    NSTextView *_comparisonResult;
+    NSString *_comparisonSource;
+    NSString *_comparisonTarget;
+    BOOL _comparisonRunning;
+    NSDate *_comparisonStart;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
@@ -212,15 +250,6 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Настройки FreeLingo…" action:@selector(showSettings:) keyEquivalent:@","];
     settings.target = self;
     [application addItem:settings];
-    NSMenuItem *models = [[NSMenuItem alloc] initWithTitle:@"Модели перевода…" action:@selector(showModels:) keyEquivalent:@"m"];
-    models.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
-    models.target = self;
-    [application addItem:models];
-    NSMenuItem *checkUpdate = [[NSMenuItem alloc] initWithTitle:@"Проверить обновления…" action:@selector(checkForUpdates:) keyEquivalent:@""];
-    checkUpdate.target = self;
-    [application addItem:checkUpdate];
-    [application addItem:NSMenuItem.separatorItem];
-    [application addItemWithTitle:@"Скрыть FreeLingo" action:@selector(hide:) keyEquivalent:@"h"];
     [application addItemWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@"q"];
 
     NSMenuItem *editItem = [NSMenuItem new];
@@ -372,41 +401,104 @@ static void FLRustCallback(char *raw, int success, void *context) {
     }
     _statusItem.button.toolTip = @"FreeLingo — локальный переводчик";
     NSMenu *menu = [NSMenu new];
-    NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Открыть FreeLingo" action:@selector(showMain:) keyEquivalent:@""];
-    open.target = self; [menu addItem:open];
-    NSMenuItem *translate = [[NSMenuItem alloc] initWithTitle:@"Перевести выделение  ⌘4" action:@selector(translateSelectionMenu:) keyEquivalent:@""];
-    translate.target = self; [menu addItem:translate];
-    NSMenuItem *clipboard = [[NSMenuItem alloc] initWithTitle:@"Перевести буфер обмена" action:@selector(translateClipboard:) keyEquivalent:@""];
-    clipboard.target = self; [menu addItem:clipboard];
-    NSMenuItem *ocr = [[NSMenuItem alloc] initWithTitle:@"Текст с экрана  ⇧⌘2" action:@selector(startOCR:) keyEquivalent:@""];
-    ocr.target = self; [menu addItem:ocr];
-    [menu addItem:NSMenuItem.separatorItem];
-    _naturalTranslationItem = [[NSMenuItem alloc] initWithTitle:@"Естественный русский перевод" action:@selector(toggleNaturalTranslation:) keyEquivalent:@""];
-    _naturalTranslationItem.target = self;
-    _naturalTranslationItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
-    [menu addItem:_naturalTranslationItem];
-    _literaryReviewItem = [[NSMenuItem alloc] initWithTitle:@"Литературная вычитка русского (медленнее)" action:@selector(toggleLiteraryReview:) keyEquivalent:@""];
-    _literaryReviewItem.target = self;
-    _literaryReviewItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"literaryRussianReview"] ? NSControlStateValueOn : NSControlStateValueOff;
-    [menu addItem:_literaryReviewItem];
-    NSMenuItem *models = [[NSMenuItem alloc] initWithTitle:@"Выбрать и скачать модель…" action:@selector(showModels:) keyEquivalent:@""];
-    models.target = self; [menu addItem:models];
+    // Keep the menu-bar popup minimal. All former actions and preferences
+    // live in the native settings window; global shortcuts still work.
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Настройки…" action:@selector(showSettings:) keyEquivalent:@""];
-    settings.target = self; [menu addItem:settings];
-    _dockMenuItem = [[NSMenuItem alloc] initWithTitle:@"Показывать значок в Dock" action:@selector(toggleDockIcon:) keyEquivalent:@""];
-    _dockMenuItem.target = self;
-    _dockMenuItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"] ? NSControlStateValueOn : NSControlStateValueOff;
-    [menu addItem:_dockMenuItem];
-    _loginMenuItem = [[NSMenuItem alloc] initWithTitle:@"Запускать при входе в macOS" action:@selector(toggleLoginItem:) keyEquivalent:@""];
-    _loginMenuItem.target = self;
-    _loginMenuItem.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
-    [menu addItem:_loginMenuItem];
-    _updateMenuItem = [[NSMenuItem alloc] initWithTitle:@"Проверить обновления…" action:@selector(checkForUpdates:) keyEquivalent:@""];
-    _updateMenuItem.target = self;
-    [menu addItem:_updateMenuItem];
+    settings.target = self;
+    [menu addItem:settings];
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@""];
+    quit.target = NSApp;
     [menu addItem:quit];
     _statusItem.menu = menu;
+}
+
+- (void)openTranslationDiagnostics:(id)sender {
+    (void)sender;
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
+        inDomains:NSUserDomainMask].firstObject;
+    NSURL *folder = [[support URLByAppendingPathComponent:@"FreeLingo" isDirectory:YES]
+        URLByAppendingPathComponent:@"Logs" isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *file = [folder URLByAppendingPathComponent:@"translation-diagnostics.log"];
+    if ([NSFileManager.defaultManager fileExistsAtPath:file.path])
+        [NSWorkspace.sharedWorkspace openURL:file];
+    else
+        [self presentMessage:@"Журнал появится после нового перевода. Исходный текст в него не записывается."];
+}
+
+- (void)runComparisonStage:(NSInteger)stage {
+    if (!_comparisonRunning || !_comparisonWindow) return;
+    NSString *modelID = stage == 1 ? @"hy-mt2-7b" : @"translategemma-4b";
+    NSInteger idx = FLModelIndexForID(modelID);
+    if (idx < 0 || !FLModelInstalled(idx)) {
+        _comparisonRunning = NO;
+        _comparisonResult.string = [_comparisonResult.string stringByAppendingFormat:@"\nМодель %@ не установлена.\n", modelID];
+        return;
+    }
+    NSString *direction = _comparisonTarget;
+    if (stage == 2) {
+        NSString *detected = FLSourceLanguage(_comparisonSource);
+        if (!detected || [detected isEqualToString:_comparisonTarget]) {
+            _comparisonRunning = NO;
+            _comparisonResult.string = [_comparisonResult.string stringByAppendingString:
+                @"\nTranslateGemma: не удалось однозначно определить исходный язык или он совпадает с целевым. Сравнение не завершено.\n"];
+            return;
+        }
+        direction = [NSString stringWithFormat:@"%@>%@", detected, _comparisonTarget];
+    }
+    _comparisonResult.string = [_comparisonResult.string stringByAppendingFormat:
+        @"\n%@ (направление %@): обрабатываю…\n", modelID, direction];
+    _comparisonStart = [NSDate date];
+    FLJob *job = [FLJob new];
+    job.controller = self;
+    job.source = _comparisonSource;
+    job.mode = @"translate";
+    job.comparisonStage = stage;
+    fl_work_async(_comparisonSource.UTF8String, direction.UTF8String, @"translate".UTF8String,
+        FLModelURL(idx).path.UTF8String, FLRustCallback, (__bridge_retained void *)job);
+}
+
+- (void)compareTranslations:(id)sender {
+    (void)sender;
+    if (_comparisonRunning) {
+        [self presentMessage:@"Сравнение уже выполняется."];
+        return;
+    }
+    NSString *text = _sourceEditor.string.length ? _sourceEditor.string :
+        [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+    if (!text.length || text.length > 15000) {
+        [self presentMessage:@"Для сравнения вставь текст длиной до 15 000 символов в главное окно FreeLingo или в буфер обмена."];
+        return;
+    }
+    NSInteger hy = FLModelIndexForID(@"hy-mt2-7b");
+    NSInteger gemma = FLModelIndexForID(@"translategemma-4b");
+    if (!FLModelInstalled(hy) || !FLModelInstalled(gemma)) {
+        [self showModels:nil];
+        [self presentMessage:@"Для сравнения скачай обе модели: Hy-MT2 7B и TranslateGemma 4B."];
+        return;
+    }
+    _comparisonSource = [text copy];
+    _comparisonTarget = FLSelectedLanguage(_mainLanguage);
+    if (![@[@"ru", @"en", @"zh", @"fr", @"it"] containsObject:_comparisonTarget]) {
+        [self presentMessage:@"Сравнение доступно для русского, английского, китайского, французского и итальянского."];
+        return;
+    }
+    if (!_comparisonWindow) {
+        _comparisonWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 760, 570)
+            styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable)
+            backing:NSBackingStoreBuffered defer:NO];
+        _comparisonWindow.title = @"FreeLingo — сравнение переводчиков";
+        [_comparisonWindow center];
+        NSScrollView *scroll = FLEditor(&_comparisonResult, NO);
+        scroll.frame = _comparisonWindow.contentView.bounds;
+        scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_comparisonWindow.contentView addSubview:scroll];
+    }
+    _comparisonResult.string = @"A/B — обе модели получают ОДИН И ТОТ ЖЕ текст. Автоматический победитель не назначается.\nРезультаты остаются только в этом окне и не отправляются в интернет.\n";
+    _comparisonRunning = YES;
+    [_comparisonWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self runComparisonStage:1];
 }
 
 - (void)toggleLiteraryReview:(id)sender {
@@ -414,6 +506,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     BOOL enabled = [NSUserDefaults.standardUserDefaults boolForKey:@"literaryRussianReview"];
     [NSUserDefaults.standardUserDefaults setBool:!enabled forKey:@"literaryRussianReview"];
     _literaryReviewItem.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsLiteraryCheckbox.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (void)toggleNaturalTranslation:(id)sender {
@@ -421,6 +514,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     BOOL enabled = [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"];
     [NSUserDefaults.standardUserDefaults setBool:!enabled forKey:@"naturalRussianTranslation"];
     _naturalTranslationItem.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsNaturalCheckbox.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 // Accessory mode has no Dock icon but keeps status item, hotkeys and windows.
@@ -607,11 +701,36 @@ static void FLRustCallback(char *raw, int success, void *context) {
             effectiveMode = @"translate_natural";
         }
     }
-    fl_work_async(text.UTF8String, language.UTF8String, effectiveMode.UTF8String, model.UTF8String,
+    NSString *targetArgument = language;
+    if ([FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"] &&
+        [effectiveMode hasPrefix:@"translate"]) {
+        NSString *detected = FLSourceLanguage(text);
+        if (!detected || [detected isEqualToString:language]) {
+            [self presentMessage:@"TranslateGemma: не удалось определить исходный язык или он совпадает с целевым. Попробуй более длинный текст на другом языке."];
+            if (quick) _quickEditor.string = @"Не удалось определить исходный язык.";
+            else { _resultEditor.string = @"Не удалось определить исходный язык."; _workButton.enabled = YES; }
+            return;
+        }
+        targetArgument = [NSString stringWithFormat:@"%@>%@", detected, language];
+    }
+    fl_work_async(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String, model.UTF8String,
                   FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job {
+    if (job.comparisonStage > 0) {
+        if (!_comparisonRunning) return;
+        NSTimeInterval elapsed = -[_comparisonStart timeIntervalSinceNow];
+        _comparisonResult.string = [_comparisonResult.string stringByAppendingFormat:
+            @"\n%@ — %.1f с:\n%@\n", ok ? @"Результат" : @"Ошибка", elapsed, result];
+        if (job.comparisonStage == 1) [self runComparisonStage:2];
+        else {
+            _comparisonRunning = NO;
+            _comparisonResult.string = [_comparisonResult.string stringByAppendingString:
+                @"\nСравни естественность языка, сохранение фактов и время перевода.\n"];
+        }
+        return;
+    }
     if (job.quick) {
         if (_quickEditor.editable) return;
         if (job.generation != _quickGeneration || ![_currentQuickSource isEqualToString:job.source] || ![_currentQuickMode isEqualToString:job.mode]) return;
@@ -915,50 +1034,207 @@ static void FLRustCallback(char *raw, int success, void *context) {
 
 #include "ModelWindow.inc"
 
+// A native settings window replaces the crowded menu-bar popup.
+// Preferences are stored immediately. Existing actions remain accessible.
+- (void)translateSelectionFromSettings:(id)sender {
+    (void)sender;
+    // Return focus to the app that had the selection before Settings opened.
+    // If there is no such app, explain that the global shortcut is preferred.
+    NSRunningApplication *origin = _settingsPreviousApp;
+    if (!origin || origin.isTerminated) {
+        [self presentMessage:@"Выдели текст в другом приложении и нажми горячую клавишу перевода (по умолчанию ⌘4)."];
+        return;
+    }
+    [_settingsWindow orderOut:nil];
+    [origin activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self translateSelectedTextWithMode:@"translate"];
+    });
+}
+
+- (void)settingsCheckboxChanged:(NSButton *)sender {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL enabled = sender.state == NSControlStateValueOn;
+    switch (sender.tag) {
+        case 1:
+            [defaults setBool:enabled forKey:@"showDockIcon"];
+            [self applyDockPreference];
+            break;
+        case 2:
+            if (enabled != [self loginItemEnabled]) [self setLoginItemEnabled:enabled];
+            sender.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+            break;
+        case 3:
+            [defaults setBool:enabled forKey:@"naturalRussianTranslation"];
+            break;
+        case 4:
+            [defaults setBool:enabled forKey:@"literaryRussianReview"];
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)settingsShortcutChanged:(NSPopUpButton *)sender {
+    if (sender.tag < 0 || sender.tag > 2) return;
+    [NSUserDefaults.standardUserDefaults setInteger:sender.indexOfSelectedItem
+                                           forKey:FLShortcutSetting((unsigned)sender.tag)];
+    [self registerGlobalHotkeys];
+}
+
+- (NSButton *)settingsCheckbox:(NSString *)title tag:(NSInteger)tag
+                            y:(CGFloat)y onView:(NSView *)root {
+    NSButton *control = [[NSButton alloc] initWithFrame:NSMakeRect(24, y, 635, 28)];
+    control.buttonType = NSButtonTypeSwitch;
+    control.title = title;
+    control.tag = tag;
+    control.font = [NSFont systemFontOfSize:14];
+    control.target = self;
+    control.action = @selector(settingsCheckboxChanged:);
+    [root addSubview:control];
+    return control;
+}
+
+- (NSButton *)settingsAction:(NSString *)title selector:(SEL)action
+                          frame:(NSRect)frame onView:(NSView *)root {
+    NSButton *button = FLButton(title, self, action);
+    button.frame = frame;
+    [root addSubview:button];
+    return button;
+}
+
+- (void)settingsHeading:(NSString *)title subtitle:(NSString *)subtitle onView:(NSView *)root {
+    NSTextField *heading = [NSTextField labelWithString:title];
+    heading.frame = NSMakeRect(24, 367, 620, 33);
+    heading.font = [NSFont boldSystemFontOfSize:22];
+    [root addSubview:heading];
+    NSTextField *sub = FLLabel(subtitle, 12);
+    sub.frame = NSMakeRect(24, 340, 640, 25);
+    [root addSubview:sub];
+}
+
+- (NSView *)settingsGeneralTab {
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 676, 418)];
+    [self settingsHeading:@"Основные" subtitle:@"Поведение FreeLingo и установка обновлений" onView:root];
+    _settingsDockCheckbox = [self settingsCheckbox:@"Показывать значок в Dock" tag:1 y:287 onView:root];
+    _settingsLoginCheckbox = [self settingsCheckbox:@"Запускать при входе в macOS" tag:2 y:250 onView:root];
+    [self settingsAction:@"Открыть FreeLingo" selector:@selector(showMain:)
+                   frame:NSMakeRect(24, 177, 192, 32) onView:root];
+    [self settingsAction:@"Выбрать модель…" selector:@selector(showModels:)
+                   frame:NSMakeRect(230, 177, 192, 32) onView:root];
+    [self settingsAction:@"Проверить обновления…" selector:@selector(checkForUpdates:)
+                   frame:NSMakeRect(436, 177, 208, 32) onView:root];
+    NSTextField *info = FLLabel(@"Модели хранятся локально. Обновления приложения проверяются через Sparkle.", 12);
+    info.frame = NSMakeRect(24, 122, 640, 30);
+    [root addSubview:info];
+    return root;
+}
+
+- (NSView *)settingsTranslationTab {
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 676, 418)];
+    [self settingsHeading:@"Перевод" subtitle:@"Качество русского и диагностика локальных моделей" onView:root];
+    _settingsNaturalCheckbox = [self settingsCheckbox:@"Естественный русский перевод" tag:3 y:282 onView:root];
+    _settingsLiteraryCheckbox = [self settingsCheckbox:@"Литературная вычитка русского (медленнее)" tag:4 y:242 onView:root];
+    [self settingsAction:@"Сравнить Hy-MT2 и TranslateGemma…" selector:@selector(compareTranslations:)
+                   frame:NSMakeRect(24, 158, 298, 34) onView:root];
+    [self settingsAction:@"Открыть журнал перевода…" selector:@selector(openTranslationDiagnostics:)
+                   frame:NSMakeRect(336, 158, 282, 34) onView:root];
+    NSTextField *info = FLLabel(@"Вычитка экспериментальная: результат может остаться без изменений или ухудшиться.", 12);
+    info.frame = NSMakeRect(24, 103, 637, 32);
+    [root addSubview:info];
+    return root;
+}
+
+- (NSView *)settingsShortcutsTab {
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 676, 418)];
+    [self settingsHeading:@"Горячие клавиши" subtitle:@"Изменения применяются и сохраняются сразу" onView:root];
+    NSArray<NSString *> *names = @[@"Перевести выделение", @"Улучшить текст", @"Текст с экрана (OCR)"];
+    NSPopUpButton *controls[3] = { nil, nil, nil };
+    for (unsigned i = 0; i < 3; ++i) {
+        CGFloat y = 265 - 56 * i;
+        NSTextField *label = FLLabel(names[i], 14);
+        label.frame = NSMakeRect(24, y + 2, 260, 24);
+        [root addSubview:label];
+        NSPopUpButton *picker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(305, y, 322, 28) pullsDown:NO];
+        [picker addItemsWithTitles:FLShortcutLabels()[i]];
+        picker.tag = (NSInteger)i;
+        picker.target = self;
+        picker.action = @selector(settingsShortcutChanged:);
+        [root addSubview:picker];
+        controls[i] = picker;
+    }
+    _settingsShortcut0 = controls[0];
+    _settingsShortcut1 = controls[1];
+    _settingsShortcut2 = controls[2];
+    NSTextField *info = FLLabel(@"Если сочетание занято другой программой, выбери альтернативу.", 12);
+    info.frame = NSMakeRect(24, 67, 620, 31);
+    [root addSubview:info];
+    return root;
+}
+
+- (NSView *)settingsActionsTab {
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 676, 418)];
+    [self settingsHeading:@"Действия" subtitle:@"Перевод, распознавание текста и инструменты" onView:root];
+    [self settingsAction:@"Перевести выделение" selector:@selector(translateSelectionFromSettings:)
+                   frame:NSMakeRect(24, 265, 290, 34) onView:root];
+    [self settingsAction:@"Перевести буфер обмена" selector:@selector(translateClipboard:)
+                   frame:NSMakeRect(334, 265, 290, 34) onView:root];
+    [self settingsAction:@"Распознать текст с экрана" selector:@selector(startOCR:)
+                   frame:NSMakeRect(24, 209, 290, 34) onView:root];
+    [self settingsAction:@"Открыть окно переводчика" selector:@selector(showMain:)
+                   frame:NSMakeRect(334, 209, 290, 34) onView:root];
+    [self settingsAction:@"Выбрать и скачать модель" selector:@selector(showModels:)
+                   frame:NSMakeRect(24, 153, 290, 34) onView:root];
+    NSTextField *note = FLLabel(@"Для выделенного текста обычно удобнее ⌘4. Кнопка вернёт фокус в прежнее приложение и попробует прочитать выделение.", 12);
+    note.frame = NSMakeRect(24, 78, 626, 45);
+    note.lineBreakMode = NSLineBreakByWordWrapping;
+    note.maximumNumberOfLines = 2;
+    [root addSubview:note];
+    return root;
+}
+
+- (void)syncSettingsControls {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    _settingsDockCheckbox.state = [defaults boolForKey:@"showDockIcon"] ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsLoginCheckbox.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsNaturalCheckbox.state = [defaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
+    _settingsLiteraryCheckbox.state = [defaults boolForKey:@"literaryRussianReview"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSArray<NSPopUpButton *> *shortcuts = @[_settingsShortcut0, _settingsShortcut1, _settingsShortcut2];
+    for (unsigned i = 0; i < 3; ++i) {
+        NSInteger choice = [defaults integerForKey:FLShortcutSetting(i)];
+        [shortcuts[i] selectItemAtIndex:MAX(0, MIN(choice, 3))];
+    }
+}
+
 - (void)showSettings:(id)sender {
     (void)sender;
-    NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Настройки FreeLingo";
-    alert.informativeText = @"Все модели работают локально. Для скачивания и переключения нажми «Модели…». Стиль перевода на русский переключается в меню FreeLingo в строке меню macOS.";
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 232)];
-    NSArray<NSString *> *names = @[@"Перевести выделение", @"Улучшить текст", @"OCR области экрана"];
-    NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray new];
-    for (unsigned i = 0; i < 3; ++i) {
-        CGFloat y = 168 - 39*i;
-        NSTextField *row = FLLabel(names[i], 12);
-        row.frame = NSMakeRect(0, y + 2, 173, 20);
-        [form addSubview:row];
-        NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(174, y, 244, 25) pullsDown:NO];
-        [popup addItemsWithTitles:FLShortcutLabels()[i]];
-        NSInteger choice = [NSUserDefaults.standardUserDefaults integerForKey:FLShortcutSetting(i)];
-        [popup selectItemAtIndex:MAX(0, MIN(choice, 3))];
-        [form addSubview:popup];
-        [popups addObject:popup];
-    }
-    NSButton *dockCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, 40, 425, 22)];
-    dockCheckbox.buttonType = NSButtonTypeSwitch;
-    dockCheckbox.title = @"Показывать иконку приложения в Dock";
-    dockCheckbox.state = [NSUserDefaults.standardUserDefaults boolForKey:@"showDockIcon"] ? NSControlStateValueOn : NSControlStateValueOff;
-    [form addSubview:dockCheckbox];
-    NSButton *loginCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 425, 22)];
-    loginCheckbox.buttonType = NSButtonTypeSwitch;
-    loginCheckbox.title = @"Запускать при входе в macOS";
-    loginCheckbox.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
-    [form addSubview:loginCheckbox];
-    alert.accessoryView = form;
-    [alert addButtonWithTitle:@"Сохранить"];
-    [alert addButtonWithTitle:@"Отмена"];
-    if ([alert runModal] == NSAlertFirstButtonReturn) {
-        for (unsigned i = 0; i < 3; ++i)
-            [NSUserDefaults.standardUserDefaults setInteger:popups[i].indexOfSelectedItem forKey:FLShortcutSetting(i)];
-        [self registerGlobalHotkeys];
-        [NSUserDefaults.standardUserDefaults setBool:(dockCheckbox.state == NSControlStateValueOn) forKey:@"showDockIcon"];
-        [self applyDockPreference];
-        if ((loginCheckbox.state == NSControlStateValueOn) != [self loginItemEnabled]) {
-            [self setLoginItemEnabled:(loginCheckbox.state == NSControlStateValueOn)];
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (front && front.processIdentifier != NSProcessInfo.processInfo.processIdentifier)
+        _settingsPreviousApp = front;
+    if (!_settingsWindow) {
+        _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 730, 506)
+            styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable)
+            backing:NSBackingStoreBuffered defer:NO];
+        _settingsWindow.title = @"FreeLingo — Настройки";
+        [_settingsWindow center];
+        NSView *root = _settingsWindow.contentView;
+        NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(15, 14, 700, 477)];
+        tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        NSArray<NSString *> *titles = @[@"Основные", @"Перевод", @"Горячие клавиши", @"Действия"];
+        NSArray<NSView *> *views = @[[self settingsGeneralTab], [self settingsTranslationTab],
+                                     [self settingsShortcutsTab], [self settingsActionsTab]];
+        for (NSUInteger i = 0; i < titles.count; ++i) {
+            NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:titles[i]];
+            item.label = titles[i];
+            item.view = views[i];
+            [tabs addTabViewItem:item];
         }
-        _loginMenuItem.state = [self loginItemEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+        [root addSubview:tabs];
     }
+    [self syncSettingsControls];
+    [_settingsWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 }
 
 - (void)presentMessage:(NSString *)message {

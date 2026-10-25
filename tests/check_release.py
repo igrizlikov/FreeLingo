@@ -10,11 +10,11 @@ main = (root / 'native' / 'main.m').read_text()
 ui = (root / 'native' / 'ModelWindow.inc').read_text()
 core = (root / 'src' / 'lib.rs').read_text()
 
-assert model.count('"sha256"') == 6, 'wrong number of model entries'
+assert model.count('"sha256"') == 7, 'wrong number of model entries'
 sha = re.findall(r'@"sha256": @"([a-f0-9]{64})"', model)
 urls = re.findall(r'@"url": @"(https://huggingface\.co/[^\"]+)"', model)
-assert len(sha) == len(urls) == model.count('@"minBytes":') == 6
-assert len(set(sha)) == 6
+assert len(sha) == len(urls) == model.count('@"minBytes":') == 7
+assert len(set(sha)) == 7
 for part in ('qwen3-0.6b', 'qwen3-1.7b', 'qwen3-4b', 'qwen3-8b', 'hy-mt2-7b', 'hy-mt2-1.8b'):
     assert part in model
 assert 'CC_SHA256_Update' in model
@@ -61,7 +61,7 @@ assert '- (void)textDidChange:(NSNotification *)notification' in main
 assert '[_quickPanel makeFirstResponder:_quickEditor]' in main
 assert 'finishQuickEditing' in main
 assert 'split_long_line(body, 1100)' in core
-assert 'quality_issue(source, &result, target)' in core
+assert 'quality_issue(source, &result, translation_target(target))' in core
 assert '"enable_thinking": false' in core
 assert 'Qwen3-8B-Q4_K_M.gguf' in model
 assert 'd98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785' in model
@@ -70,11 +70,11 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.6'
-assert int(plist['CFBundleVersion']) == 16
+assert plist['CFBundleShortVersionString'] == '0.6.8'
+assert int(plist['CFBundleVersion']) == 18
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
-assert 'quality_issue(source, &result, target)' in core
+assert 'quality_issue(source, &result, translation_target(target))' in core
 assert '--ctx-size", "6144"' in core
 print('OK: version, editor reentrancy guards and translation quality checks')
 
@@ -109,3 +109,29 @@ assert 'polish_document(' in core and 'russian_editor_model(' in core
 assert 'SIGNING_IDENTITY' in (root / 'build-macos.sh').read_text()
 assert 'REQUIRE_STABLE_SIGNING' in (root / 'build-macos.sh').read_text()
 print('OK: source-aware postediting mode and optional persistent code signing')
+
+# v0.6.7: explicit comparison, no fabricated model-quality ranking and
+# postedit diagnostics that never include the source or translated text.
+assert 'translategemma-4b' in model
+assert '526747309109c016db547c6fc1c7b0c9c286b5e7a7556827b5419fd9543a09cd' in model
+assert 'translate_gemma_model' in core and 'source_lang_code' in core and 'target_lang_code' in core
+assert 'translation-diagnostics.log' in core and 'polish_document(' in core
+assert 'Сравнить Hy-MT2 и TranslateGemma' in main
+assert 'FLSourceLanguage(' in main and 'NLLanguageRecognizer' in main
+assert (root/'replica/quality_cases.json').exists()
+assert (root/'tests/translation_ab_macos.py').exists()
+print('OK: TranslateGemma 4B, explicit language routing, privacy-safe diagnostics, A/B UI, multilingual corpus')
+
+# v0.6.8: only two items in status menu and four-tab preferences.
+status_menu = main.split('- (void)createStatusMenu {', 1)[1].split('- (void)openTranslationDiagnostics:', 1)[0]
+assert status_menu.count('[menu addItem:') == 2, 'menu bar icon must have only Settings and Quit'
+assert 'initWithTitle:@"Настройки…"' in status_menu and 'initWithTitle:@"Завершить FreeLingo"' in status_menu
+for action in ('Перевести выделение', 'Перевести буфер обмена', 'Текст с экрана', 'Естественный русский перевод',
+               'Литературная вычитка', 'Выбрать и скачать модель', 'Сравнить Hy-MT2', 'Открыть журнал перевода',
+               'Показывать значок в Dock', 'Запускать при входе', 'Проверить обновления'):
+    assert ('initWithTitle:@"' + action) not in status_menu, f'extraneous status menu entry {action}'
+assert 'NSTabView' in main and 'settingsGeneralTab' in main and 'settingsTranslationTab' in main
+assert 'settingsShortcutsTab' in main and 'settingsActionsTab' in main
+assert 'settingsCheckboxChanged:' in main and 'settingsShortcutChanged:' in main
+assert 'registerGlobalHotkeys];' in main and 'checkForUpdates:' in main and 'compareTranslations:' in main
+print('OK: compact status menu, functional native settings tabs and preserved actions')

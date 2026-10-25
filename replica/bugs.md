@@ -42,3 +42,9 @@
 **SOURCE_CONFIRMED:** `build-macos.sh` 0.6.5 использует ad-hoc `codesign --sign -`, что меняет designated requirement при каждом обновлении.
 
 **PARTIAL:** 0.6.6 позволяет задать постоянную identity. Пока в GitHub Actions не импортирован постоянный сертификат, проблема останется. После настройки требуется на реальном Mac проверить `codesign -dvv` и обновление через Sparkle.
+
+### 2026-10-25 — RU translation remains nonidiomatic after postediting
+- OBSERVED: English family sample translated with Hy-MT2 7B; awkward calques and poor word choice remained.
+- OBSERVED: Qwen postediting sometimes replaced «пожилая» with «старая».
+- SOURCE_CONFIRMED: earlier 0.6.6 postedit silently returned original on rejection; diagnostics now distinguish decisions.
+- UNTESTED: 0.6.7 A/B test between Hy-MT2 7B and TranslateGemma 4B has not run on real hardware.

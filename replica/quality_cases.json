@@ -1,0 +1,22 @@
+[
+  {
+    "id": "family_en_ru",
+    "source_lang": "en", "target_lang": "ru",
+    "source": "My Wonderful Family\nI live in a house near the mountains. I have two brothers and one sister, and I was born last. My father teaches mathematics, and my mother is a nurse at a big hospital. My brothers are very smart and work hard in school. My sister is a nervous girl, but she is very kind. My grandmother also lives with us. She came from Italy when I was two years old. She has grown old, but she is still very strong. She cooks the best food!\nMy family is very important to me. We do lots of things together. My brothers and I like to go on long walks in the mountains. My sister likes to cook with my grandmother. On the weekends we all play board games together. We laugh and always have a good time. I love my family very much.",
+    "reference_ru": "Моя замечательная семья\nЯ живу в доме недалеко от гор. У меня два брата и сестра, а я самый младший ребёнок в семье. Мой отец преподаёт математику, а мама работает медсестрой в большой больнице. Мои братья очень умные и усердно учатся в школе. Моя сестра немного нервная, но очень добрая. С нами также живёт бабушка. Она приехала из Италии, когда мне было два года. Бабушка уже пожилая, но всё ещё очень сильная. Она готовит вкуснее всех!\nМоя семья очень важна для меня. Мы многое делаем вместе. Мы с братьями любим подолгу гулять в горах, а сестра любит готовить вместе с бабушкой. По выходным мы всей семьёй играем в настольные игры. Мы смеёмся и всегда прекрасно проводим время вместе. Я очень люблю свою семью.",
+    "human_checks": ["two brothers remain plural throughout", "born last => youngest family child", "mother is a nurse", "sister is nervous but kind", "grandmother came from Italy", "idiomatic long walks and have a good time"]
+  },
+  {"id":"counts_en_ru", "source_lang":"en", "target_lang":"ru", "source":"My sister has two brothers, three cats and one dog. Both brothers study at school.", "human_checks":["two brothers plural", "three cats", "one dog", "both brothers"]},
+  {"id":"idioms_en_ru", "source_lang":"en", "target_lang":"ru", "source":"We had a wonderful time together. I took a long walk and finally felt at home.", "human_checks":["idiomatic have a wonderful time", "idiomatic feel at home"]},
+  {"id":"ru_en", "source_lang":"ru", "target_lang":"en", "source":"Я самый младший в семье. У меня два брата и одна сестра. Мама работает медсестрой.", "human_checks":["youngest child", "two brothers", "nurse"]},
+  {"id":"zh_ru", "source_lang":"zh", "target_lang":"ru", "source":"我有两个哥哥和一个妹妹。周末我们一起去山里散步。", "human_checks":["two older brothers", "one younger sister", "weekend mountain walk"]},
+  {"id":"fr_ru", "source_lang":"fr", "target_lang":"ru", "source":"Ma mère est infirmière. Nous passons toujours de bons moments ensemble.", "human_checks":["mother is nurse", "natural time together"]},
+  {"id":"it_ru", "source_lang":"it", "target_lang":"ru", "source":"Mia nonna viene dall'Italia. È anziana, ma molto forte. Cucina benissimo.", "human_checks":["grandmother from Italy", "elderly but strong", "excellent cook"]},
+  {"id":"ru_zh", "source_lang":"ru", "target_lang":"zh", "source":"Моя бабушка готовит вкуснее всех, а мы с братьями часто гуляем в горах.", "human_checks":["grandmother best cook", "brothers plural", "mountains"]},
+  {"id":"ru_fr", "source_lang":"ru", "target_lang":"fr", "source":"По выходным мы всей семьёй играем в настольные игры и отлично проводим время.", "human_checks":["weekends", "board games", "natural idiom"]},
+  {"id":"ru_it", "source_lang":"ru", "target_lang":"it", "source":"У меня два брата и сестра. Я самый младший в семье.", "human_checks":["two brothers", "sister", "youngest"]},
+  {"id":"en_fr", "source_lang":"en", "target_lang":"fr", "source":"I have two brothers and a sister. Our grandmother makes wonderful food.", "human_checks":["two brothers", "one sister", "grandmother"]},
+  {"id":"fr_it", "source_lang":"fr", "target_lang":"it", "source":"Ma famille est très importante pour moi. Nous nous amusons toujours ensemble.", "human_checks":["family important", "idiomatic having fun"]},
+  {"id":"it_zh", "source_lang":"it", "target_lang":"zh", "source":"Mio padre insegna matematica. Mia madre è infermiera.", "human_checks":["father teaches math", "mother nurse"]},
+  {"id":"zh_en", "source_lang":"zh", "target_lang":"en", "source":"我奶奶来自意大利。她虽然年纪大了，但身体依然很强壮。", "human_checks":["grandmother came from Italy", "old but strong"]}
+]

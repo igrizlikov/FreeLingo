@@ -18,3 +18,8 @@ F16,Hy-MT2-7B specialized offline translation,Rust/Model Manager,must,untested,O
 F17,Hy-MT2-1.8B lightweight offline translation,Rust/Model Manager,should,untested,Official Q4 GGUF and SHA verified; 0.6.4 source,Requires macOS inference test
 F18,English French Italian Chinese Russian language pairs,Translation,should,untested,Official Hy-MT2 supported language list; prompt routing tests,20 directed pairs need E2E
 F19,Idiomatic Russian A-B translation preset,Rust/AppKit,must,untested,0.6.5 source and static checks,Requires comparison on real Mac before claiming quality improvement
+F20,TranslateGemma 4B Q4_K_M model selection,Model Manager,must,untested,0.6.7 code and SHA metadata only,Must verify structured prompt with bundled llama.cpp on macOS
+F21,Local side by side translation comparison,AppKit,must,untested,0.6.7 UI source only,Requires actual Mac run on original family story
+F22,Privacy-safe postediting diagnostic status,Rust/AppKit,must,untested,0.6.7 source only,Requires checked journal status in real app
+F23,Multilingual A/B corpus (5 languages),Tests,should,partial,14 human-judged cases,Mac performance and fluency untested
+F24,Compact menu-bar menu and AppKit settings sections,AppKit,should,untested,static tests only,macOS UI QA and signed release pending

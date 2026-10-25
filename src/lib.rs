@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.6 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.7 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub type Completion = extern "C" fn(*mut c_char, c_int, *mut c_void);
 
@@ -192,6 +192,43 @@ fn start_server(model: &Path) -> Result<Backend, String> {
 
 /// Hy-MT2 GGUF is a translation-only model, not a general editor.
 /// Keep the original Qwen branch for rewriting and other target languages.
+fn translate_gemma_model(model: &Path) -> bool {
+    model.file_name().and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase().starts_with("translategemma-"))
+        .unwrap_or(false)
+}
+
+// This log intentionally contains NO source or translation content.
+// Users can inspect rejected edits without revealing clipboard contents.
+fn translation_diagnostic(model: &Path, event: &str, detail: &str) {
+    let Some(models_dir) = model.parent() else { return; };
+    let Some(support) = models_dir.parent() else { return; };
+    let log_dir = support.join("Logs");
+    if fs::create_dir_all(&log_dir).is_err() { return; }
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    // Only constant status strings are passed as event and detail.
+    if let Ok(mut file) = File::options().create(true).append(true)
+        .open(log_dir.join("translation-diagnostics.log")) {
+        let name = model.file_name().and_then(|x| x.to_str()).unwrap_or("unknown");
+        let _ = writeln!(file, "{seconds} model={name} event={event} detail={detail}");
+    }
+}
+
+fn translation_target(target: &str) -> &str {
+    target.rsplit_once('>').map(|(_, t)| t).unwrap_or(target)
+}
+
+fn gemma_language_codes(target: &str) -> Result<(&str, &str), String> {
+    let Some((source, to)) = target.split_once('>') else {
+        return Err("TranslateGemma: нужен определённый исходный язык. Выдели более длинный фрагмент.".into());
+    };
+    let supported = ["ru", "en", "zh", "fr", "it"];
+    if !supported.contains(&source) || !supported.contains(&to) || source == to {
+        return Err("TranslateGemma: выбери разные языки из русского, английского, китайского, французского и итальянского.".into());
+    }
+    Ok((source, to))
+}
+
 fn hy_mt2_model(model: &Path) -> bool {
     model.file_name().and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase().starts_with("hy-mt2-"))
@@ -233,6 +270,23 @@ fn hy_mt2_prompt(source: &str, target: &str, natural: bool, retry: bool) -> Resu
 
 // Return per-model request data, separated from HTTP for deterministic tests.
 fn make_payload(source: &str, target: &str, operation: &str, model: &Path, attempt: usize) -> Result<Value, String> {
+    if translate_gemma_model(model) {
+        if operation != "translate" && operation != "translate_natural" {
+            return Err("TranslateGemma работает только в режиме перевода.".into());
+        }
+        let (source_code, target_code) = gemma_language_codes(target)?;
+        // llama.cpp's specialized TranslateGemma adapter reads language codes
+        // from chat_template_kwargs. The pinned llama.cpp tag must be smoke-tested.
+        return Ok(json!({
+            "model": "freelingo", "stream": false,
+            "temperature": 0.0, "max_tokens": 2800,
+            "chat_template_kwargs": {
+                "source_lang_code": source_code,
+                "target_lang_code": target_code
+            },
+            "messages": [{"role": "user", "content": source}]
+        }));
+    }
     if hy_mt2_model(model) {
         if operation != "translate" && operation != "translate_natural" {
             return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
@@ -287,7 +341,7 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str)
             .ok_or("Движок не вернул текст")?;
         let result = plain_answer(result);
         let truncated = answer.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length");
-        let problem = quality_issue(source, &result, target);
+        let problem = quality_issue(source, &result, translation_target(target));
         if !truncated && problem.is_none() { return Ok(result); }
         previous_error = if truncated { "Ответ модели обрезан".into() }
             else { problem.unwrap_or("Невозможно проверить ответ").to_owned() };
@@ -318,34 +372,48 @@ fn polish_payload(source: &str, draft: &str, retry: bool) -> Value {
     })
 }
 
-fn russian_polish(session: &Backend, source: &str, draft: &str) -> String {
-    // Silent fallback to the trusted translation if an editor's output loses
-    // basic meaning, is truncated, or cannot be retrieved. The UI marks this
-    // option experimental; detailed quality still needs a human review.
+fn russian_polish(session: &Backend, source: &str, draft: &str) -> (String, &'static str) {
+    // Never silently imply that an editor succeeded. Rejection reasons are
+    // logged without the raw text (which may contain private clipboard data).
+    let mut last_reason = "отклонён";
     for attempt in 0..2 {
         let payload = polish_payload(source, draft, attempt > 0);
         let response = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
             &session.token, Some(&payload.to_string()), "240");
-        let Ok(response) = response else { continue };
-        if response.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") { continue; }
-        let Some(result) = response.pointer("/choices/0/message/content").and_then(Value::as_str) else { continue; };
+        let Ok(response) = response else { last_reason = "ошибка_движка"; continue; };
+        if response.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+            last_reason = "ответ_обрезан";
+            continue;
+        }
+        let Some(result) = response.pointer("/choices/0/message/content").and_then(Value::as_str) else {
+            last_reason = "нет_ответа";
+            continue;
+        };
         let result = plain_answer(result);
-        if quality_issue(source, &result, "ru").is_some() { continue; }
-        if result.len() * 2 < draft.len() || result.len() > draft.len() * 2 { continue; }
-        return result;
+        if quality_issue(source, &result, "ru").is_some() { last_reason = "потеря_фактов_или_языка"; continue; }
+        if result.len() * 2 < draft.len() || result.len() > draft.len() * 2 {
+            last_reason = "подозрительная_длина";
+            continue;
+        }
+        if result.trim() == draft.trim() { return (draft.to_owned(), "без_изменений"); }
+        return (result, "принято");
     }
-    draft.to_owned()
+    (draft.to_owned(), last_reason)
 }
 
 fn polish_document(session: &Backend, original: &str, translation: &str) -> String {
-    // Keep line and paragraph boundaries, preserving the blank lines.
     let source_lines: Vec<&str> = original.split('\n').collect();
     let translated_lines: Vec<&str> = translation.split('\n').collect();
-    if source_lines.len() != translated_lines.len() { return translation.to_owned(); }
+    if source_lines.len() != translated_lines.len() {
+        translation_diagnostic(&session.model, "review", "структура_абзацев_не_совпала");
+        return translation.to_owned();
+    }
     source_lines.iter().zip(translated_lines.iter())
         .map(|(source, draft)| {
-            if source.trim().is_empty() || draft.trim().is_empty() { (*draft).to_owned() }
-            else { russian_polish(session, source, draft) }
+            if source.trim().is_empty() || draft.trim().is_empty() { return (*draft).to_owned(); }
+            let (revision, reason) = russian_polish(session, source, draft);
+            translation_diagnostic(&session.model, "review", reason);
+            revision
         }).collect::<Vec<_>>().join("\n")
 }
 
@@ -353,6 +421,12 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
+    if translate_gemma_model(&path) {
+        gemma_language_codes(target)?;
+        if operation != "translate" && operation != "translate_natural" {
+            return Err("TranslateGemma не редактирует текст; выбери режим перевода.".into());
+        }
+    }
     // Validate model-specific capabilities before loading multi-GB GGUF into memory.
     if hy_mt2_model(&path) {
         if operation != "translate" && operation != "translate_natural" && operation != "translate_reviewed" {
@@ -368,6 +442,7 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
         Some(russian_editor_model(&path).ok_or(
             "Для литературной вычитки нужна Qwen3 4B или 8B. Скачай её в разделе «Модели».".to_owned())?)
     } else { None };
+    translation_diagnostic(&path, "request", if operation == "translate_reviewed" { "вычитка_включена" } else { "обычный_перевод" });
     let mut guard = backend().lock().map_err(|_| "Внутренняя ошибка движка".to_string())?;
     let restart = match guard.as_mut() {
         None => true,
@@ -394,6 +469,7 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
         output.push_str(separator);
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
+    translation_diagnostic(&path, "translation", "результат_получен");
     if let Some(editor_path) = editor_path {
         // Load only one big model at a time; replace Hy-MT2 with Qwen for review.
         if let Some(mut previous) = guard.take() {
@@ -442,6 +518,19 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn gemma_requires_direction_and_uses_template_kwargs() {
+        let model = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
+        assert!(translate_gemma_model(model));
+        let payload = make_payload("I have two brothers.", "en>ru", "translate", model, 0).unwrap();
+        assert_eq!(payload["chat_template_kwargs"]["source_lang_code"], "en");
+        assert_eq!(payload["chat_template_kwargs"]["target_lang_code"], "ru");
+        assert_eq!(payload["messages"][0]["content"], "I have two brothers.");
+        assert!(make_payload("hello", "ru", "translate", model, 0).is_err());
+        assert!(make_payload("hello", "en>en", "translate", model, 0).is_err());
+        assert!(make_payload("hello", "en>ru", "rewrite", model, 0).is_err());
+        assert_eq!(translation_target("en>ru"), "ru");
+    }
+
     #[test] fn polish_includes_original_and_translation() {
         let j = polish_payload("I have two brothers.", "У меня два брата.", false);
         let messages = j["messages"].as_array().unwrap();
