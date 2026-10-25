@@ -2,7 +2,7 @@
 
 **Для владельца установленной FreeLingo 0.6.2:** повторно устанавливать DMG не нужно. Этот ZIP содержит ИСХОДНЫЙ КОД для публикации новой версии. Загрузите `FreeLingo063.zip` в корень GitHub-репозитория, затем в Actions запустите существующий `Publish FreeLingo signed update` с `source_zip = FreeLingo063.zip`. Если Actions завершится успешно, приложение 0.6.2 увидит 0.6.3 через меню «Проверить обновления…».
 
-**Для разработчика:** публичный ключ Sparkle уже хранится в `SPARKLE_PUBLIC_ED_KEY`, приватный — в `SPARKLE_PRIVATE_ED_KEY`. НЕ вставляйте приватный ключ в исходники. Версия `CFBundleShortVersionString=0.6.3`, сборка `CFBundleVersion=13` (строго больше 12). Модели хранятся отдельно в `~/Library/Application Support/FreeLingo/Models/` и при обновлении .app не удаляются.
+**Для разработчика:** публичный ключ Sparkle уже хранится в `SPARKLE_PUBLIC_ED_KEY`, приватный — в `SPARKLE_PRIVATE_ED_KEY`. НЕ вставляйте приватный ключ в исходники. Версия `CFBundleShortVersionString=0.6.6`, сборка `CFBundleVersion=16` (строго больше 12). Модели хранятся отдельно в `~/Library/Application Support/FreeLingo/Models/` и при обновлении .app не удаляются.
 
 ## Исправления 0.6.3
 
@@ -102,3 +102,9 @@ FreeLingo: MIT. llama.cpp/ggml: MIT; Qwen: Apache-2.0. Sparkle: его собс�
 Источники модели и лицензии: https://huggingface.co/tencent/Hy-MT2-7B-GGUF и https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF (Apache-2.0).
 
 Для проверки новой модели на runner macOS после сборки запусти `python3 tests/smoke_hy_macos.py`. Скрипт скачает 1,13 ГБ и проверит запуск и выдачу пяти языков (не качество). Сам скрипт пока не запускался на macOS.
+
+### v0.6.6: защита разрешений и второй этап перевода
+
+Из-за `codesign --sign -` система macOS может сбрасывать выданное разрешение после каждого обновления. Код сборки теперь принимает `SIGNING_IDENTITY` и `SIGNING_KEYCHAIN`; пока они не установлены, проблема **не решена**. Подробности: `RELEASE_0.6.6_RU.md`.
+
+Меню «Литературная вычитка русского (медленнее)» даёт экспериментальный двухэтапный перевод: Hy-MT2 + Qwen3. Если Qwen не скачана, FreeLingo предлагает установить её в разделе моделей.

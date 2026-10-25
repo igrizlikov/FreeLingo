@@ -122,6 +122,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *_loginMenuItem;
     NSMenuItem *_updateMenuItem;
     NSMenuItem *_naturalTranslationItem;
+    NSMenuItem *_literaryReviewItem;
     NSTextView *_sourceEditor;
     NSTextView *_resultEditor;
     NSTextView *_quickEditor;
@@ -165,7 +166,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _sessionHistory = [NSMutableArray new];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         @"modelID": @"qwen3-4b", @"languageIndex": @0,
-        @"showDockIcon": @NO, @"naturalRussianTranslation": @YES
+        @"showDockIcon": @NO, @"naturalRussianTranslation": @YES, @"literaryRussianReview": @NO
     }];
     [self createApplicationMenu];
     [self createMainWindow];
@@ -384,6 +385,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _naturalTranslationItem.target = self;
     _naturalTranslationItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
     [menu addItem:_naturalTranslationItem];
+    _literaryReviewItem = [[NSMenuItem alloc] initWithTitle:@"Литературная вычитка русского (медленнее)" action:@selector(toggleLiteraryReview:) keyEquivalent:@""];
+    _literaryReviewItem.target = self;
+    _literaryReviewItem.state = [NSUserDefaults.standardUserDefaults boolForKey:@"literaryRussianReview"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:_literaryReviewItem];
     NSMenuItem *models = [[NSMenuItem alloc] initWithTitle:@"Выбрать и скачать модель…" action:@selector(showModels:) keyEquivalent:@""];
     models.target = self; [menu addItem:models];
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Настройки…" action:@selector(showSettings:) keyEquivalent:@""];
@@ -402,6 +407,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Завершить FreeLingo" action:@selector(terminate:) keyEquivalent:@""];
     [menu addItem:quit];
     _statusItem.menu = menu;
+}
+
+- (void)toggleLiteraryReview:(id)sender {
+    (void)sender;
+    BOOL enabled = [NSUserDefaults.standardUserDefaults boolForKey:@"literaryRussianReview"];
+    [NSUserDefaults.standardUserDefaults setBool:!enabled forKey:@"literaryRussianReview"];
+    _literaryReviewItem.state = !enabled ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (void)toggleNaturalTranslation:(id)sender {
@@ -586,9 +598,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
     // Select a style preset without changing the UI's logical translate mode
     // (used by popup lifecycle guards). Other target languages remain unchanged.
     NSString *effectiveMode = mode;
-    if ([mode isEqualToString:@"translate"] && [language isEqualToString:@"ru"] &&
-        [NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"]) {
-        effectiveMode = @"translate_natural";
+    if ([mode isEqualToString:@"translate"] && [language isEqualToString:@"ru"]) {
+        NSString *activeID = FLModels()[(NSUInteger)modelIndex][@"id"];
+        if ([activeID hasPrefix:@"hy-mt2-"] &&
+            [NSUserDefaults.standardUserDefaults boolForKey:@"literaryRussianReview"]) {
+            effectiveMode = @"translate_reviewed";
+        } else if ([NSUserDefaults.standardUserDefaults boolForKey:@"naturalRussianTranslation"]) {
+            effectiveMode = @"translate_natural";
+        }
     }
     fl_work_async(text.UTF8String, language.UTF8String, effectiveMode.UTF8String, model.UTF8String,
                   FLRustCallback, (__bridge_retained void *)job);

@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.5 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.6 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -295,18 +295,79 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str)
     Err(format!("{previous_error}. Попробуй ещё раз или выбери другую модель."))
 }
 
+// Optional second pass: a general-purpose local model edits Hy-MT2's Russian
+// translation WITH the original text in view. This is explicitly experimental:
+// a language model cannot guarantee that every nuance or fact is preserved.
+fn russian_editor_model(model: &Path) -> Option<PathBuf> {
+    let folder = model.parent()?;
+    ["Qwen3-8B-Q4_K_M.gguf", "Qwen3-4B-Q4_K_M.gguf"]
+        .iter().map(|name| folder.join(name)).find(|p| p.is_file())
+}
+
+fn polish_payload(source: &str, draft: &str, retry: bool) -> Value {
+    let extra = if retry { "Previous revision did not pass checks. Keep ALL source facts and remove no sentences." } else { "" };
+    json!({
+        "model": "freelingo", "stream": false, "temperature": 0.15,
+        "top_p": 0.8, "max_tokens": 2500,
+        "chat_template_kwargs": {"enable_thinking": false},
+        "messages": [
+            {"role": "system", "content": format!(
+                "You are a native Russian literary copy editor and bilingual accuracy checker. The original is authoritative. Rewrite ONLY the Russian translation, correcting unnatural expressions, grammar, idioms and register. Preserve exact meaning, singular/plural, counts, chronology, kinship, named entities, titles, sentiment and every detail from the original. Do not translate again from scratch, add information, explain, summarize or change the original content. Output only polished Russian. {extra} /no_think")},
+            {"role": "user", "content": format!("ORIGINAL TEXT:\n{source}\n\nRUSSIAN DRAFT TO POLISH:\n{draft}")}
+        ]
+    })
+}
+
+fn russian_polish(session: &Backend, source: &str, draft: &str) -> String {
+    // Silent fallback to the trusted translation if an editor's output loses
+    // basic meaning, is truncated, or cannot be retrieved. The UI marks this
+    // option experimental; detailed quality still needs a human review.
+    for attempt in 0..2 {
+        let payload = polish_payload(source, draft, attempt > 0);
+        let response = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
+            &session.token, Some(&payload.to_string()), "240");
+        let Ok(response) = response else { continue };
+        if response.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") { continue; }
+        let Some(result) = response.pointer("/choices/0/message/content").and_then(Value::as_str) else { continue; };
+        let result = plain_answer(result);
+        if quality_issue(source, &result, "ru").is_some() { continue; }
+        if result.len() * 2 < draft.len() || result.len() > draft.len() * 2 { continue; }
+        return result;
+    }
+    draft.to_owned()
+}
+
+fn polish_document(session: &Backend, original: &str, translation: &str) -> String {
+    // Keep line and paragraph boundaries, preserving the blank lines.
+    let source_lines: Vec<&str> = original.split('\n').collect();
+    let translated_lines: Vec<&str> = translation.split('\n').collect();
+    if source_lines.len() != translated_lines.len() { return translation.to_owned(); }
+    source_lines.iter().zip(translated_lines.iter())
+        .map(|(source, draft)| {
+            if source.trim().is_empty() || draft.trim().is_empty() { (*draft).to_owned() }
+            else { russian_polish(session, source, draft) }
+        }).collect::<Vec<_>>().join("\n")
+}
+
 fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Result<String, String> {
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
     // Validate model-specific capabilities before loading multi-GB GGUF into memory.
     if hy_mt2_model(&path) {
-        if operation != "translate" && operation != "translate_natural" {
+        if operation != "translate" && operation != "translate_natural" && operation != "translate_reviewed" {
             return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
         }
         hy_target_name(target).ok_or_else(||
             "Выбранный язык не поддерживается Hy-MT2 в этой версии FreeLingo. Переключись на Qwen3.".to_owned())?;
     }
+    if operation == "translate_reviewed" && (!hy_mt2_model(&path) || target != "ru") {
+        return Err("Литературная вычитка поддерживается только для Hy-MT2 → русский".into());
+    }
+    let editor_path = if operation == "translate_reviewed" {
+        Some(russian_editor_model(&path).ok_or(
+            "Для литературной вычитки нужна Qwen3 4B или 8B. Скачай её в разделе «Модели».".to_owned())?)
+    } else { None };
     let mut guard = backend().lock().map_err(|_| "Внутренняя ошибка движка".to_string())?;
     let restart = match guard.as_mut() {
         None => true,
@@ -326,12 +387,22 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
             let parts = split_long_line(body, 1100);
             for (index, part) in parts.iter().enumerate() {
                 if index > 0 { output.push(' '); }
-                output.push_str(&request_chunk(session, part, target, operation)?);
+                let translate_mode = if operation == "translate_reviewed" { "translate_natural" } else { operation };
+                output.push_str(&request_chunk(session, part, target, translate_mode)?);
             }
         }
         output.push_str(separator);
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
+    if let Some(editor_path) = editor_path {
+        // Load only one big model at a time; replace Hy-MT2 with Qwen for review.
+        if let Some(mut previous) = guard.take() {
+            let _ = previous.child.kill(); let _ = previous.child.wait();
+        }
+        *guard = Some(start_server(&editor_path)?);
+        let editor = guard.as_ref().ok_or("Редактор не запущен")?;
+        return Ok(polish_document(editor, source, &output));
+    }
     Ok(output)
 }
 
@@ -371,6 +442,17 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn polish_includes_original_and_translation() {
+        let j = polish_payload("I have two brothers.", "У меня два брата.", false);
+        let messages = j["messages"].as_array().unwrap();
+        assert!(messages[1]["content"].as_str().unwrap().contains("I have two brothers."));
+        assert!(messages[1]["content"].as_str().unwrap().contains("У меня два брата."));
+        assert_eq!(j["chat_template_kwargs"]["enable_thinking"], false);
+    }
+    #[test] fn russian_editor_selects_existing_model() {
+        let missing = russian_editor_model(Path::new("/nonexistent/Hy-MT2-7B-Q4_K_M.gguf"));
+        assert!(missing.is_none());
+    }
     #[test] fn language_prompt() { assert!(system_prompt("fi", "translate").contains("Finnish")); }
     #[test] fn improve_prompt() { assert!(system_prompt("en", "rewrite").contains("editor")); }
     #[test] fn prevent_qwen_reasoning() {

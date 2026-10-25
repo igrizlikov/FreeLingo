@@ -1,8 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Native macOS/Apple Silicon build. Produces an ad-hoc signed .app and DMG.
-# An ad-hoc signature is NOT notarization / Developer ID certification.
+# Native macOS/Apple Silicon build. Produces a .app and DMG.
+# SIGNING_IDENTITY and SIGNING_KEYCHAIN opt in to a persistent code-signing identity.
+# An ad-hoc signature (default) changes its designated requirement every build;
+# macOS may therefore require Accessibility permission after each update.
+ # A private/self-signed certificate is intended for controlled personal machines,
+ # not public Gatekeeper distribution. Developer ID + notarization is recommended.
 # Can run on GitHub Actions: no developer tools are required on the user's Mac.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
@@ -107,11 +111,32 @@ xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=15.0 -fobjc-arc -fmodu
   -lresolv -liconv -o "$BIN/FreeLingo"
 
 chmod +x "$BIN/FreeLingo" "$BIN/llama-server"
+# The same identity must sign EVERY RELEASE to retain macOS TCC Accessibility grants.
+# EdDSA archive signing alone does not provide stable macOS code identity.
+IDENTITY="${SIGNING_IDENTITY:--}"
+if [[ "${REQUIRE_STABLE_SIGNING:-0}" == "1" && "$IDENTITY" == "-" ]]; then
+  echo 'ERROR: Stable signing identity required; refusing an ad-hoc release.' >&2
+  exit 1
+fi
+SIGN_ARGS=(--force --sign "$IDENTITY" --timestamp=none)
+if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+  [[ -f "$SIGNING_KEYCHAIN" ]] || { echo 'ERROR: signing keychain missing' >&2; exit 1; }
+  SIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN")
+fi
+if [[ "${SIGNING_DEVELOPER_ID:-0}" == "1" ]]; then
+  [[ "$IDENTITY" != "-" ]] || { echo 'ERROR: Developer ID cannot use ad-hoc signing' >&2; exit 1; }
+  SIGN_ARGS=(--force --sign "$IDENTITY" --options runtime --timestamp)
+  if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then SIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN"); fi
+fi
 for component in "$BIN"/*.dylib "$BIN/llama-server"; do
   [[ -f "$component" ]] || continue
-  codesign --force --sign - --timestamp=none "$component"
+  codesign "${SIGN_ARGS[@]}" "$component"
 done
-codesign --force --sign - --timestamp=none "$APP"
+codesign "${SIGN_ARGS[@]}" "$APP"
+if [[ "$IDENTITY" != "-" ]]; then
+  codesign -dvv "$APP" 2>&1 | grep -E 'Authority=|TeamIdentifier=|Signature='
+  codesign -d --requirements - "$APP" 2>&1 | grep -F 'designated =>'
+fi
 # Ensure the app resolves Sparkle from the bundle, never the CI build machine.
 otool -L "$BIN/FreeLingo" | grep -F '@rpath/Sparkle.framework/Versions/'
 [[ -f "$APP/Contents/Frameworks/Sparkle.framework/Resources/Info.plist" ]] || \

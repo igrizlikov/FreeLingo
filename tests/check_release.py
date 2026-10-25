@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.5'
-assert int(plist['CFBundleVersion']) == 15
+assert plist['CFBundleShortVersionString'] == '0.6.6'
+assert int(plist['CFBundleVersion']) == 16
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, target)' in core
@@ -101,3 +101,11 @@ assert 'translate_natural' in core and 'translate_natural' in main
 assert 'translation style must strictly conform' in core
 assert 'natural_style_uses_official_hy_style_template' in core
 print('OK: opt-in A/B comparison between natural and standard Russian translation')
+
+# v0.6.6: a two-stage editor with source fidelity and opt-in persistent signing.
+assert 'literaryRussianReview' in main
+assert 'translate_reviewed' in main and 'translate_reviewed' in core
+assert 'polish_document(' in core and 'russian_editor_model(' in core
+assert 'SIGNING_IDENTITY' in (root / 'build-macos.sh').read_text()
+assert 'REQUIRE_STABLE_SIGNING' in (root / 'build-macos.sh').read_text()
+print('OK: source-aware postediting mode and optional persistent code signing')
