@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.3 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.4 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -90,7 +90,7 @@ fn has_cjk(text: &str) -> bool {
 fn quality_issue(source: &str, result: &str, target: &str) -> Option<&'static str> {
     if result.trim().is_empty() { return Some("Пустой ответ модели"); }
     if target != "ru" { return None; }
-    if !has_cjk(source) && has_cjk(result) { return Some("Посторонние иероглифы в русском переводе"); }
+    if has_cjk(result) { return Some("Посторонние иероглифы в русском переводе"); }
     let cyrillic = result.chars().filter(|c| matches!(*c as u32, 0x0400..=0x052F)).count();
     let latin = result.chars().filter(|c| c.is_ascii_alphabetic()).count();
     if source.len() > 55 && cyrillic + latin > 30 && cyrillic * 100 < (cyrillic + latin) * 60 {
@@ -168,7 +168,7 @@ fn start_server(model: &Path) -> Result<Backend, String> {
     let mut cmd = Command::new(server);
     cmd.arg("--model").arg(model)
         .args(["--host", "127.0.0.1", "--port", &port.to_string(),
-               "--ctx-size", "6144", "--n-gpu-layers", "99", "--no-webui", "--alias", "freelingo", "--api-key", &token]);
+               "--ctx-size", "6144", "--n-gpu-layers", "99", "--jinja", "--no-webui", "--alias", "freelingo", "--api-key", &token]);
     cmd.stdin(Stdio::null()).stdout(Stdio::null());
     if let Some(f) = log { cmd.stderr(Stdio::from(f)); } else { cmd.stderr(Stdio::null()); }
     let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить llama.cpp: {e}"))?;
@@ -190,6 +190,66 @@ fn start_server(model: &Path) -> Result<Backend, String> {
     Err("Не удалось загрузить модель за 95 секунд. См. Logs/llama-server.log".into())
 }
 
+/// Hy-MT2 GGUF is a translation-only model, not a general editor.
+/// Keep the original Qwen branch for rewriting and other target languages.
+fn hy_mt2_model(model: &Path) -> bool {
+    model.file_name().and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase().starts_with("hy-mt2-"))
+        .unwrap_or(false)
+}
+
+fn hy_target_name(target: &str) -> Option<&'static str> {
+    match target {
+        "ru" => Some("Russian"), "en" => Some("English"),
+        "zh" => Some("Chinese"), "fr" => Some("French"),
+        "it" => Some("Italian"), "de" => Some("German"),
+        "es" => Some("Spanish"), "ja" => Some("Japanese"),
+        _ => None,
+    }
+}
+
+// As recommended in Tencent's Hy-MT2 model card: user-only instruction,
+// without a generic system prompt or Qwen-specific /no_think directive.
+fn hy_mt2_prompt(source: &str, target: &str, retry: bool) -> Result<String, String> {
+    let language = hy_target_name(target).ok_or_else(||
+        "Hy-MT2 не поддерживает выбранный язык в FreeLingo. Для этого языка выбери Qwen3.".to_string())?;
+    let advice = if retry {
+        " Preserve all numbers, plurality, professions, names and relationships; use natural wording."
+    } else { "" };
+    Ok(format!("Translate the following text into {language}. Note that you should only output the translated result without any additional explanation:{advice}\n\n{source}"))
+}
+
+// Return per-model request data, separated from HTTP for deterministic tests.
+fn make_payload(source: &str, target: &str, operation: &str, model: &Path, attempt: usize) -> Result<Value, String> {
+    if hy_mt2_model(model) {
+        if operation != "translate" {
+            return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
+        }
+        let user_prompt = hy_mt2_prompt(source, target, attempt > 0)?;
+        Ok(json!({
+            "model": "freelingo", "stream": false,
+            "temperature": 0.7, "top_p": 0.6, "top_k": 20,
+            "repeat_penalty": 1.05, "max_tokens": 4096,
+            "messages": [{"role": "user", "content": user_prompt}]
+        }))
+    } else {
+        let mut instruction = system_prompt(target, operation);
+        if attempt > 0 {
+            instruction.push_str(" Carefully recheck counts, professions, family relations, and target language. Do not omit anything; produce the complete answer.");
+        }
+        Ok(json!({
+            "model": "freelingo", "stream": false,
+            "temperature": if attempt == 0 { 0.1 } else { 0.25 },
+            "top_p": 0.85, "max_tokens": 1800,
+            "chat_template_kwargs": { "enable_thinking": false },
+            "messages": [
+                { "role": "system", "content": instruction },
+                { "role": "user", "content": source }
+            ]
+        }))
+    }
+}
+
 fn plain_answer(value: &str) -> String {
     // Qwen3 may emit reasoning tags on engines where enable_thinking is ignored.
     let mut text = value.trim();
@@ -204,20 +264,7 @@ fn plain_answer(value: &str) -> String {
 fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str) -> Result<String, String> {
     let mut previous_error = "Модель вернула некачественный результат".to_owned();
     for attempt in 0..3 {
-        let mut instruction = system_prompt(target, operation);
-        if attempt > 0 {
-            instruction.push_str(" Carefully recheck counts, professions, family relations, and target language. Do not omit anything; produce the complete answer.");
-        }
-        let payload = json!({
-            "model": "freelingo", "stream": false,
-            "temperature": if attempt == 0 { 0.1 } else { 0.25 },
-            "top_p": 0.85, "max_tokens": 1800,
-            "chat_template_kwargs": { "enable_thinking": false },
-            "messages": [
-                { "role": "system", "content": instruction },
-                { "role": "user", "content": source }
-            ]
-        });
+        let payload = make_payload(source, target, operation, &session.model, attempt)?;
         let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
             &session.token, Some(&payload.to_string()), "240")?;
         if let Some(err) = answer.get("error") { return Err(err.to_string()); }
@@ -237,6 +284,14 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str) -> Re
     if source.trim().is_empty() { return Err("Нет текста для обработки".into()); }
     if source.len() > 50_000 { return Err("Максимальная длина запроса: 50 КБ".into()); }
     let path = PathBuf::from(model);
+    // Validate model-specific capabilities before loading multi-GB GGUF into memory.
+    if hy_mt2_model(&path) {
+        if operation != "translate" {
+            return Err("Hy-MT2 предназначена только для перевода. Для «Улучшить текст» выбери Qwen3.".to_owned());
+        }
+        hy_target_name(target).ok_or_else(||
+            "Выбранный язык не поддерживается Hy-MT2 в этой версии FreeLingo. Переключись на Qwen3.".to_owned())?;
+    }
     let mut guard = backend().lock().map_err(|_| "Внутренняя ошибка движка".to_string())?;
     let restart = match guard.as_mut() {
         None => true,
@@ -306,6 +361,35 @@ mod tests {
     #[test] fn prevent_qwen_reasoning() {
         assert_eq!(plain_answer("<think>Reasoning</think>   Привет"), "Привет");
     }
+    #[test] fn hy_model_detection() {
+        assert!(hy_mt2_model(Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf")));
+        assert!(hy_mt2_model(Path::new("/Models/Hy-MT2-1.8B-Q4_K_M.gguf")));
+        assert!(!hy_mt2_model(Path::new("/Models/Qwen3-4B-Q4_K_M.gguf")));
+    }
+    #[test] fn hy_language_targets() {
+        for code in ["ru", "en", "zh", "fr", "it"] { assert!(hy_target_name(code).is_some()); }
+        assert!(hy_target_name("fi").is_none());
+    }
+    #[test] fn hy_prompt_uses_user_only_and_official_sampling() {
+        let model = Path::new("/Models/Hy-MT2-7B-Q4_K_M.gguf");
+        let json = make_payload("My Wonderful Family", "ru", "translate", model, 0).unwrap();
+        assert_eq!(json["temperature"], 0.7);
+        assert_eq!(json["top_p"], 0.6);
+        assert_eq!(json["top_k"], 20);
+        assert_eq!(json["repeat_penalty"], 1.05);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(json["messages"][0]["role"], "user");
+        assert!(json["messages"][0]["content"].as_str().unwrap().contains("into Russian"));
+        assert!(!json.to_string().contains("/no_think"));
+    }
+    #[test] fn hy_rewrite_rejected() {
+        assert!(make_payload("Привет", "ru", "rewrite", Path::new("Hy-MT2-7B-Q4_K_M.gguf"), 0).is_err());
+    }
+    #[test] fn qwen_payload_unchanged() {
+        let j = make_payload("Hello", "ru", "translate", Path::new("Qwen3-4B-Q4_K_M.gguf"), 0).unwrap();
+        assert_eq!(j["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(j["temperature"], 0.1);
+    }
     #[test] fn unchanged_answer() { assert_eq!(plain_answer("  Привет  "), "Привет"); }
     #[test] fn split_preserves_word_boundaries() {
         let parts = split_long_line("Hello wonderful family. We are all happy here. Everyone is welcome.", 32);
@@ -318,6 +402,10 @@ mod tests {
     #[test] fn detect_foreign_script_in_russian_output() {
         assert!(has_cjk("моя мама — 护士 в больнице"));
         assert!(!has_cjk("моя мама — медсестра в больнице"));
+    }
+    #[test] fn chinese_to_russian_must_not_leave_chinese() {
+        assert_eq!(quality_issue("我的妈妈是一名护士。", "Моя мама — 护士.", "ru"),
+            Some("Посторонние иероглифы в русском переводе"));
     }
     #[test] fn quality_catches_language_leakage() {
         assert_eq!(quality_issue("My mother is a nurse at a big hospital.",

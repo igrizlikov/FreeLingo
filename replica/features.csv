@@ -14,3 +14,6 @@ F12,Translate DOCX/PDF/PPTX,Files,should,missing,Only TXT and MD,Not implemented
 F13,Translate SRT/VTT,Files,should,missing,No subtitle-specific parser,Not implemented
 F14,Persistent translation history,History,should,missing,Session-only history,Not implemented
 F15,Dictionary and alternatives,UX,could,missing,No implementation,Not implemented
+F16,Hy-MT2-7B specialized offline translation,Rust/Model Manager,must,untested,Official Q4 GGUF and SHA verified; 0.6.4 source,Requires macOS llama inference and comparison
+F17,Hy-MT2-1.8B lightweight offline translation,Rust/Model Manager,should,untested,Official Q4 GGUF and SHA verified; 0.6.4 source,Requires macOS inference test
+F18,English French Italian Chinese Russian language pairs,Translation,should,untested,Official Hy-MT2 supported language list; prompt routing tests,20 directed pairs need E2E

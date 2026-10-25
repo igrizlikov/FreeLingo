@@ -17,7 +17,7 @@
     title.font = [NSFont boldSystemFontOfSize:19];
     title.frame = NSMakeRect(22, 278, 530, 30);
     [root addSubview:title];
-    NSTextField *explanation = FLLabel(@"Одна загрузка — затем перевод офлайн. Никаких подписок и Ollama.", 13);
+    NSTextField *explanation = FLLabel(@"Hy-MT2 — специально для перевода. Русский, английский, китайский, французский, итальянский.", 12);
     explanation.frame = NSMakeRect(22, 252, 540, 25);
     [root addSubview:explanation];
 
