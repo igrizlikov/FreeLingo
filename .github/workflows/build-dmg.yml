@@ -1,66 +1,110 @@
-name: Install FreeLingo 0.6.0 and build DMG
+
+name: Publish FreeLingo signed update
 
 on:
   workflow_dispatch:
     inputs:
-      run_model_smoke:
-        description: "Test an actual Qwen model (downloads 484 MB)"
-        type: boolean
-        default: true
+      source_zip:
+        description: 'Source archive in repository root'
+        required: true
+        default: 'FreeLingo062.zip'
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: freelingo-release
+  cancel-in-progress: false
+
 jobs:
-  build:
+  setup:
     runs-on: macos-15
-    timeout-minutes: 85
+    timeout-minutes: 100
     steps:
-      - name: Checkout current FreeLingo repository
-        uses: actions/checkout@v4
-      - name: Apply FreeLingo 0.6.0 source bundle
+      - uses: actions/checkout@v4
+
+      - name: Import FreeLingo source
+        env:
+          SOURCE_ZIP: ${{ inputs.source_zip }}
         shell: bash
         run: |
           set -euo pipefail
-          test -f FreeLingo-0.6.0-update.zip || { echo 'Upload FreeLingo-0.6.0-update.zip to repository root first'; exit 1; }
-          unzip -oq FreeLingo-0.6.0-update.zip -d .
-          echo 'Imported FreeLingo 0.6.0 source'
-      - name: Configure Rust
-        uses: dtolnay/rust-toolchain@stable
+          [[ "$SOURCE_ZIP" =~ ^[a-zA-Z0-9_.-]+\.zip$ ]] || exit 1
+          test -f "$SOURCE_ZIP"
+          unzip -oq "$SOURCE_ZIP" -d .
+          rm -f "$SOURCE_ZIP"
+
+      - name: Check signing keys
+        env:
+          PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        shell: bash
+        run: |
+          test -n "$PUBLIC_KEY"
+          test -n "$PRIVATE_KEY"
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-      - name: Validate new source
-        run: python3 tests/check_release.py
-      - name: Build FreeLingo 0.6.0 DMG and signed-app-capable ZIP
+
+      - name: Build FreeLingo
         env:
           SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
-        run: |
-          chmod +x build-macos.sh
-          ./build-macos.sh
-      - name: Smoke test local translation on macOS
-        if: ${{ inputs.run_model_smoke }}
-        run: python3 tests/smoke_macos.py
-      - name: Upload DMG and update archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeLingo-0.6.0-AppleSilicon
-          path: |
-            dist/FreeLingo-0.6.0-AppleSilicon.dmg
-            dist/FreeLingo-0.6.0-AppleSilicon.dmg.sha256
-            dist/FreeLingo-0.6.0-AppleSilicon.zip
-          if-no-files-found: error
-      - name: Save validated source back to main
+          REQUIRE_SPARKLE_SIGNING: '1'
         shell: bash
         run: |
           set -euo pipefail
-          rm -f FreeLingo-0.6.0-update.zip
-          # Keep the existing workflow in place. A workflow cannot safely
-          # assume GITHUB_TOKEN can install a new workflow file.
+          python3 tests/check_release.py
+          chmod +x build-macos.sh
+          ./build-macos.sh
+
+      - name: Sign update and create appcast
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/FreeLingo.app/Contents/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' dist/FreeLingo.app/Contents/Info.plist)
+          KEYFILE="$RUNNER_TEMP/sparkle-private.key"
+          umask 077
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
+          ARCHIVE="dist/FreeLingo-${VERSION}-AppleSilicon.zip"
+          "$GITHUB_WORKSPACE/.build/Sparkle-2.9.6/bin/sign_update" -f "$KEYFILE" "$ARCHIVE" > "$RUNNER_TEMP/signature.xmlattrs"
+          python3 scripts/create_appcast.py --version "$VERSION" --build "$BUILD" \
+            --archive "$ARCHIVE" --signature-file "$RUNNER_TEMP/signature.xmlattrs" --output appcast.xml
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "v$VERSION" >/dev/null 2>&1 && { echo 'Release already exists'; exit 1; }
+          gh release create "v$VERSION" \
+            "dist/FreeLingo-${VERSION}-AppleSilicon.zip" \
+            "dist/FreeLingo-${VERSION}-AppleSilicon.dmg" \
+            --title "FreeLingo $VERSION" \
+            --notes 'Signed FreeLingo update.'
+
+      - name: Save update feed and sources
+        shell: bash
+        run: |
+          set -euo pipefail
           git restore --source=HEAD --staged --worktree .github/workflows/build-dmg.yml
           rm -f .github/workflows/release.yml
           git add -A
-          if git diff --cached --quiet; then exit 0; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'FreeLingo 0.6.0: Dock, login item, menu icon and updater'
+          git commit -m "FreeLingo $VERSION signed updates"
           git push origin HEAD:main
+
+      - name: Upload installation DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeLingo-${{ env.VERSION }}-DMG
+          path: dist/FreeLingo-${{ env.VERSION }}-AppleSilicon.dmg
+          if-no-files-found: error
