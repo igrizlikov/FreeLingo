@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.12 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.13 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};

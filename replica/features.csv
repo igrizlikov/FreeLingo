@@ -30,3 +30,5 @@ F28,One-click clear source and result,AppKit,should,untested,0.6.10 clearMain an
 F29,Correlated private translation diagnostics,Rust/AppKit,must,untested,0.6.11 origin and keyed hash logging source only,Needs macOS CI build and same-text main-vs-hotkey log check
 F30,Paragraph-preserving hotkey capture,Accessibility,must,untested,0.6.12 clipboard fallback and source equivalence checks,macOS browsers TextEdit and pasteboard restoration require E2E
 F31,TranslateGemma 12B model selection and A-B,Models,must,untested,Official GGUF 12B SHA and 0.6.12 source,macOS llama engine validation and quality A-B required
+
+source_language_override,"Выбор исходного языка для коротких текстов",translation,must,untested,"native/main.m; tests/check_release.py","Авто или явный язык в основном и быстром окне; требуется сборка и тест на Mac"

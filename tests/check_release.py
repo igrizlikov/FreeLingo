@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.12'
-assert int(plist['CFBundleVersion']) == 22
+assert plist['CFBundleShortVersionString'] == '0.6.13'
+assert int(plist['CFBundleVersion']) == 23
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -164,7 +164,7 @@ print('OK: v0.6.10 plain-text editors, one-click clear and stale-result guard')
 assert 'void fl_work_async_diagnostic(' in (root/'native/FreeLingoCore.h').read_text()
 assert main.count('fl_work_async_diagnostic(') == 2
 assert 'origin:@"hotkey"' in main and 'origin:@"ocr"' in main and 'origin:@"clipboard"' in main
-assert '"ab",' in main and 'FLSourceLanguage(_comparisonSource)' in main
+assert '"ab",' in main and '_comparisonSourceCode' in main
 for field in ('request_id=', 'origin=', 'source_hash=', 'raw_hash=', 'pair=', 'source_lang=', 'target_lang=', 'operation=', 'chunks=', 'temperature=', 'top_p=', 'top_k=', 'repeat_penalty=', 'max_tokens=', 'result_hash='):
     assert field in core, field
 assert 'TRACE_HASHER.get_or_init(RandomState::new)' in core
@@ -184,3 +184,12 @@ assert '_comparisonModels' in main and '@"translategemma-12b"' in main
 assert 'if (![downloadedID isEqualToString:@"translategemma-12b"])' in ui
 assert 'trace_session()' in core
 print('OK: v0.6.12 paragraph-preserving clipboard probe, safe replacement, content hash, TranslateGemma 12B')
+
+# v0.6.13: short-fragment source override and both TranslateGemma generations.
+assert 'FLSourceLanguageNames' in main and 'FLResolvedSourceLanguage' in main
+assert '_mainSourceLanguage' in main and '_quickSourceLanguage' in main
+assert 'quickSourceLanguageChanged:' in main and 'sourceLanguage = FLResolvedSourceLanguage' in main
+assert '[activeModelID hasPrefix:@"translategemma-"]' in main
+assert '[FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"]' not in main
+assert '_comparisonSourceCode = FLResolvedSourceLanguage(text, _mainSourceLanguage)' in main
+print('OK: v0.6.13 explicit source language in main and popup, both Gemma sizes')

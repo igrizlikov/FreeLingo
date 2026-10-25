@@ -58,6 +58,22 @@ static NSString *FLSourceLanguage(NSString *text) {
     return [supported containsObject:code] ? code : nil;
 }
 
+// Optional explicit source language: short snippets cannot always be
+// classified reliably by NaturalLanguage. Manual selection wins over guessing.
+static NSArray<NSString *> *FLSourceLanguageNames(void) {
+    return @[@"Авто", @"Английский", @"Русский", @"Китайский", @"Французский", @"Итальянский"];
+}
+static NSArray<NSString *> *FLSourceLanguageCodes(void) {
+    return @[@"", @"en", @"ru", @"zh", @"fr", @"it"];
+}
+static NSString *FLResolvedSourceLanguage(NSString *text, NSPopUpButton *picker) {
+    NSInteger idx = picker ? picker.indexOfSelectedItem : 0;
+    if (idx > 0 && idx < (NSInteger)FLSourceLanguageCodes().count) {
+        return FLSourceLanguageCodes()[(NSUInteger)idx];
+    }
+    return FLSourceLanguage(text);
+}
+
 static NSInteger FLModelIndexForID(NSString *modelID) {
     for (NSUInteger index = 0; index < FLModels().count; index++) {
         if ([FLModels()[index][@"id"] isEqualToString:modelID]) return (NSInteger)index;
@@ -206,6 +222,8 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSSegmentedControl *_tabs;
     NSPopUpButton *_mainLanguage;
     NSPopUpButton *_quickLanguage;
+    NSPopUpButton *_mainSourceLanguage;
+    NSPopUpButton *_quickSourceLanguage;
     NSButton *_replaceButton;
     NSButton *_quickEditButton;
     NSButton *_workButton;
@@ -252,6 +270,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSTextView *_comparisonResult;
     NSString *_comparisonSource;
     NSString *_comparisonTarget;
+    NSString *_comparisonSourceCode;
     NSArray<NSString *> *_comparisonModels;
     BOOL _comparisonRunning;
     NSDate *_comparisonStart;
@@ -357,6 +376,16 @@ static void FLRustCallback(char *raw, int success, void *context) {
     languageLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:languageLabel];
 
+    NSTextField *sourceLanguageLabel = FLLabel(@"Из:", 13);
+    sourceLanguageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:sourceLanguageLabel];
+    _mainSourceLanguage = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [_mainSourceLanguage addItemsWithTitles:FLSourceLanguageNames()];
+    [_mainSourceLanguage selectItemAtIndex:0];
+    _mainSourceLanguage.toolTip = @"Исходный язык: Авто или выбери вручную для коротких фраз";
+    _mainSourceLanguage.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:_mainSourceLanguage];
+
     NSScrollView *source = FLEditor(&_sourceEditor, YES);
     NSScrollView *result = FLEditor(&_resultEditor, YES); // Users can correct translations in place.
     _sourceEditor.string = @"";
@@ -394,9 +423,13 @@ static void FLRustCallback(char *raw, int success, void *context) {
         [languageLabel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
         [_mainLanguage.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
         [_mainLanguage.leadingAnchor constraintEqualToAnchor:languageLabel.trailingAnchor constant:12],
+        [sourceLanguageLabel.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
+        [sourceLanguageLabel.leadingAnchor constraintEqualToAnchor:_mainLanguage.trailingAnchor constant:14],
+        [_mainSourceLanguage.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
+        [_mainSourceLanguage.leadingAnchor constraintEqualToAnchor:sourceLanguageLabel.trailingAnchor constant:6],
         [clearButton.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
         [clearButton.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
-        [clearButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:_mainLanguage.trailingAnchor constant:12],
+        [clearButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:_mainSourceLanguage.trailingAnchor constant:12],
         [columns.topAnchor constraintEqualToAnchor:languageLabel.bottomAnchor constant:16],
         [columns.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
         [columns.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
@@ -426,6 +459,17 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _quickLanguage.action = @selector(quickLanguageChanged:);
     _quickLanguage.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:_quickLanguage];
+    NSTextField *quickSourceLabel = FLLabel(@"Из:", 13);
+    quickSourceLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:quickSourceLabel];
+    _quickSourceLanguage = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [_quickSourceLanguage addItemsWithTitles:FLSourceLanguageNames()];
+    [_quickSourceLanguage selectItemAtIndex:0];
+    _quickSourceLanguage.toolTip = @"Для короткого текста выбери исходный язык вместо Авто";
+    _quickSourceLanguage.target = self;
+    _quickSourceLanguage.action = @selector(quickSourceLanguageChanged:);
+    _quickSourceLanguage.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:_quickSourceLanguage];
     NSButton *dismiss = FLButton(@"Закрыть", self, @selector(dismissQuick:));
     dismiss.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:dismiss];
@@ -445,6 +489,11 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [NSLayoutConstraint activateConstraints:@[
         [_quickLanguage.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
         [_quickLanguage.topAnchor constraintEqualToAnchor:root.topAnchor constant:17],
+        [quickSourceLabel.centerYAnchor constraintEqualToAnchor:_quickLanguage.centerYAnchor],
+        [quickSourceLabel.leadingAnchor constraintEqualToAnchor:_quickLanguage.trailingAnchor constant:12],
+        [_quickSourceLanguage.centerYAnchor constraintEqualToAnchor:_quickLanguage.centerYAnchor],
+        [_quickSourceLanguage.leadingAnchor constraintEqualToAnchor:quickSourceLabel.trailingAnchor constant:5],
+        [dismiss.leadingAnchor constraintGreaterThanOrEqualToAnchor:_quickSourceLanguage.trailingAnchor constant:8],
         [dismiss.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
         [dismiss.centerYAnchor constraintEqualToAnchor:_quickLanguage.centerYAnchor],
         [scroll.topAnchor constraintEqualToAnchor:_quickLanguage.bottomAnchor constant:16],
@@ -506,7 +555,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     }
     NSString *direction = _comparisonTarget;
     if ([modelID hasPrefix:@"translategemma-"]) {
-        NSString *detected = FLSourceLanguage(_comparisonSource);
+        NSString *detected = _comparisonSourceCode;
         if (!detected || [detected isEqualToString:_comparisonTarget]) {
             _comparisonRunning = NO;
             _comparisonResult.string = [_comparisonResult.string stringByAppendingString:
@@ -528,7 +577,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     job.comparisonStage = stage;
     fl_work_async_diagnostic(_comparisonSource.UTF8String, direction.UTF8String, effectiveMode.UTF8String,
         FLModelURL(idx).path.UTF8String, "ab",
-        (FLSourceLanguage(_comparisonSource) ?: @"unknown").UTF8String, FLRustCallback, (__bridge_retained void *)job);
+        (_comparisonSourceCode ?: @"unknown").UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
 
 - (void)compareTranslations:(id)sender {
@@ -570,6 +619,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
         @[@"hy-mt2-7b", @"translategemma-4b"];
     _comparisonSource = [text copy];
     _comparisonTarget = FLSelectedLanguage(_mainLanguage);
+    _comparisonSourceCode = FLResolvedSourceLanguage(text, _mainSourceLanguage);
     if (![@[@"ru", @"en", @"zh", @"fr", @"it"] containsObject:_comparisonTarget]) {
         [self presentMessage:@"Сравнение доступно для русского, английского, китайского, французского и итальянского."];
         return;
@@ -838,19 +888,23 @@ static void FLRustCallback(char *raw, int success, void *context) {
         }
     }
     NSString *targetArgument = language;
-    if ([FLModels()[(NSUInteger)modelIndex][@"id"] isEqualToString:@"translategemma-4b"] &&
-        [effectiveMode hasPrefix:@"translate"]) {
-        NSString *detected = FLSourceLanguage(text);
-        if (!detected || [detected isEqualToString:language]) {
-            [self presentMessage:@"TranslateGemma: не удалось определить исходный язык или он совпадает с целевым. Попробуй более длинный текст на другом языке."];
-            if (quick) _quickEditor.string = @"Не удалось определить исходный язык.";
-            else { _resultEditor.string = @"Не удалось определить исходный язык."; _workButton.enabled = YES; }
+    NSString *sourceLanguage = FLResolvedSourceLanguage(text, quick ? _quickSourceLanguage : _mainSourceLanguage);
+    NSString *activeModelID = FLModels()[(NSUInteger)modelIndex][@"id"];
+    // Both 4B and 12B require explicit source>target routing.
+    if ([activeModelID hasPrefix:@"translategemma-"] && [effectiveMode hasPrefix:@"translate"]) {
+        if (!sourceLanguage || [sourceLanguage isEqualToString:language]) {
+            NSString *hint = sourceLanguage
+                ? @"Исходный и целевой языки совпадают. Выбери правильный язык в поле «Из:»."
+                : @"Не удалось определить исходный язык короткого текста. Выбери его вручную в поле «Из:» (например, «Английский»).";
+            if (quick) _quickEditor.string = hint;
+            else { _resultEditor.string = hint; _workButton.enabled = YES; }
+            // Do not block a global hotkey translation with a separate modal alert.
             return;
         }
-        targetArgument = [NSString stringWithFormat:@"%@>%@", detected, language];
+        targetArgument = [NSString stringWithFormat:@"%@>%@", sourceLanguage, language];
     }
     NSString *origin = quick ? (_quickOrigin ?: @"hotkey") : @"main";
-    NSString *sourceLanguage = FLSourceLanguage(text) ?: @"unknown";
+    sourceLanguage = sourceLanguage ?: @"unknown";
     fl_work_async_diagnostic(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
         model.UTF8String, origin.UTF8String, sourceLanguage.UTF8String, FLRustCallback, (__bridge_retained void *)job);
 }
@@ -932,6 +986,14 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [NSUserDefaults.standardUserDefaults setInteger:_mainLanguage.indexOfSelectedItem forKey:@"languageIndex"];
 }
 - (void)quickLanguageChanged:(id)sender {
+    (void)sender;
+    if (_currentQuickSource.length) {
+        _currentQuickResult = @"";
+        _replaceButton.enabled = NO;
+        [self request:_currentQuickSource mode:_currentQuickMode quick:YES language:FLSelectedLanguage(_quickLanguage)];
+    }
+}
+- (void)quickSourceLanguageChanged:(id)sender {
     (void)sender;
     if (_currentQuickSource.length) {
         _currentQuickResult = @"";
