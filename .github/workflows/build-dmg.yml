@@ -1,65 +1,92 @@
-
-name: Publish FreeLingo signed update
-
-on:
-  workflow_dispatch:
-    inputs:
-      source_zip:
-        description: 'Source archive in repository root'
-        required: true
-        default: 'FreeLingo062.zip'
-        type: string
-
-permissions:
-  contents: write
-
-concurrency:
-  group: freelingo-release
-  cancel-in-progress: false
-
-jobs:
-  setup:
-    runs-on: macos-15
-    timeout-minutes: 100
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Import FreeLingo source
-        env:
-          SOURCE_ZIP: ${{ inputs.source_zip }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_ZIP" =~ ^[a-zA-Z0-9_.-]+\.zip$ ]] || exit 1
-          test -f "$SOURCE_ZIP"
-          unzip -oq "$SOURCE_ZIP" -d .
-          rm -f "$SOURCE_ZIP"
-
-      - name: Check signing keys
-        env:
-          PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
-          PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
-        shell: bash
-        run: |
-          test -n "$PUBLIC_KEY"
-          test -n "$PRIVATE_KEY"
-
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Take the first imported identity; the signing P12 must contain only one identity.
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) .*/\1/p' | head -1)"
+          [[ -n "$IDENTITY" ]] || { echo 'ERROR: P12 has no usable code-signing identity'; exit 1; }
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo 'REQUIRE_STABLE_SIGNING=1' >> "$GITHUB_ENV"
+          echo 'Permanent code signing identity imported for build.'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-
-      - name: Build FreeLingo
+      - name: Build signed-update-capable .app and DMG
         env:
           SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
           REQUIRE_SPARKLE_SIGNING: '1'
         shell: bash
         run: |
-          set -euo pipefail
           python3 tests/check_release.py
           chmod +x build-macos.sh
           ./build-macos.sh
-
-      - name: Sign update and create appcast
+      - name: Sign Sparkle ZIP and create update feed
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         shell: bash
@@ -76,8 +103,7 @@ jobs:
           python3 scripts/create_appcast.py --version "$VERSION" --build "$BUILD" \
             --archive "$ARCHIVE" --signature-file "$RUNNER_TEMP/signature.xmlattrs" --output appcast.xml
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-
-      - name: Publish GitHub release
+      - name: Publish initial Github release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -87,22 +113,21 @@ jobs:
           gh release create "v$VERSION" \
             "dist/FreeLingo-${VERSION}-AppleSilicon.zip" \
             "dist/FreeLingo-${VERSION}-AppleSilicon.dmg" \
-            --title "FreeLingo $VERSION" \
-            --notes 'Signed FreeLingo update.'
-
-      - name: Save update feed and sources
+            --title "FreeLingo $VERSION" --notes 'Signed FreeLingo update with in-app installation.'
+      - name: Store update feed and source files in repository
         shell: bash
         run: |
           set -euo pipefail
+          # Preserve this published workflow; GITHUB_TOKEN may not be allowed
+          # to create or edit .github/workflows in an automated commit.
           git restore --source=HEAD --staged --worktree .github/workflows/build-dmg.yml
           rm -f .github/workflows/release.yml
           git add -A
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m "FreeLingo $VERSION signed updates"
+          git commit -m "FreeLingo $VERSION - enable signed updates"
           git push origin HEAD:main
-
-      - name: Upload installation DMG
+      - name: Upload DMG for bootstrap and recovery
         uses: actions/upload-artifact@v4
         with:
           name: FreeLingo-${{ env.VERSION }}-DMG
