@@ -134,6 +134,8 @@ static NSTextField *FLLabel(NSString *s, CGFloat size) {
     t.textColor = NSColor.secondaryLabelColor;
     return t;
 }
+#include "GlassUI.h"
+
 // Always paste plain text into FreeLingo: never inherit HTML/RTF fonts,
 // colours or background from browsers, documents or other applications.
 @interface FLPlainTextView : NSTextView
@@ -147,7 +149,8 @@ static NSTextField *FLLabel(NSString *s, CGFloat size) {
 static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
     scroll.hasVerticalScroller = YES;
-    scroll.borderType = NSBezelBorder;
+    scroll.borderType = NSNoBorder;
+    scroll.drawsBackground = NO;
     scroll.autohidesScrollers = YES;
     FLPlainTextView *text = [[FLPlainTextView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
     text.minSize = NSMakeSize(0, 200);
@@ -156,13 +159,18 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
     text.horizontallyResizable = NO;
     text.autoresizingMask = NSViewWidthSizable;
     text.textContainer.widthTracksTextView = YES;
-    text.textContainerInset = NSMakeSize(14, 14);
+    text.textContainerInset = NSMakeSize(18, 16);
     text.editable = editable;
     text.selectable = YES;
     text.richText = NO;
     text.importsGraphics = NO;
-    text.font = [NSFont systemFontOfSize:16];
-    text.backgroundColor = [NSColor colorWithCalibratedWhite:0.155 alpha:1.0];
+    text.font = [NSFont systemFontOfSize:17];
+    text.textColor = NSColor.textColor;
+    text.backgroundColor = NSColor.textBackgroundColor;
+    text.allowsUndo = YES;
+    NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
+    paragraph.lineSpacing = 5;
+    text.defaultParagraphStyle = paragraph;
     scroll.documentView = text;
     if (out) *out = text;
     return scroll;
@@ -245,6 +253,12 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
     NSButton *_quickEditButton;
     NSButton *_workButton;
     NSTextField *_statusLabel;
+    NSArray<NSButton *> *_navigationButtons;
+    NSTextField *_pageTitle, *_modelNameLabel, *_modelStateLabel;
+    NSTextField *_sourceCountLabel, *_resultCountLabel, *_detectedLanguageLabel;
+    NSProgressIndicator *_translationSpinner;
+    BOOL _historyShowing;
+    NSString *_savedResultBeforeHistory;
     NSString *_currentQuickSource;
     NSString *_currentQuickResult;
     NSString *_currentQuickMode;
@@ -369,100 +383,261 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
 }
 
 - (void)createMainWindow {
-    _mainWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1020, 660)
+    _mainWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 740)
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable |
-                   NSWindowStyleMaskMiniaturizable)
+                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskFullSizeContentView)
         backing:NSBackingStoreBuffered defer:NO];
     _mainWindow.releasedWhenClosed = NO;
+    _mainWindow.delegate = self;
     _mainWindow.title = @"FreeLingo";
-    _mainWindow.minSize = NSMakeSize(700, 440);
-    _mainWindow.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    _mainWindow.titleVisibility = NSWindowTitleHidden;
+    _mainWindow.titlebarAppearsTransparent = YES;
+    _mainWindow.minSize = NSMakeSize(1000, 600);
+    _mainWindow.backgroundColor = NSColor.windowBackgroundColor;
     [_mainWindow center];
-    NSView *root = _mainWindow.contentView;
-    root.wantsLayer = YES;
-    root.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.14 alpha:1].CGColor;
+    NSView *root = [[FLGlassCanvas alloc] initWithFrame:_mainWindow.contentView.bounds];
+    _mainWindow.contentView = root;
 
+    NSVisualEffectView *sidebar = [NSVisualEffectView new];
+    sidebar.material = NSVisualEffectMaterialSidebar;
+    sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    sidebar.state = NSVisualEffectStateFollowsWindowActiveState;
+    sidebar.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:sidebar];
+    NSView *content = [NSView new];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [sidebar.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [sidebar.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [sidebar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [sidebar.widthAnchor constraintEqualToConstant:212],
+        [content.leadingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:24],
+        [content.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-24],
+        [content.topAnchor constraintEqualToAnchor:root.topAnchor constant:42],
+        [content.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-22]
+    ]];
+
+    NSImageView *logo = [NSImageView new];
+    NSString *iconPath = [NSBundle.mainBundle pathForResource:@"FreeLingo" ofType:@"icns"];
+    logo.image = iconPath ? [[NSImage alloc] initWithContentsOfFile:iconPath] : [NSImage imageNamed:NSImageNameApplicationIcon];
+    [logo.widthAnchor constraintEqualToConstant:36].active = YES;
+    [logo.heightAnchor constraintEqualToConstant:36].active = YES;
+    NSStackView *brand = FLStack(@[logo, FLStack(@[FLHeading(@"FreeLingo", 20), FLLabel(@"Личный переводчик", 11)], YES, 2)], NO, 9);
+    brand.translatesAutoresizingMaskIntoConstraints = NO;
+    [sidebar addSubview:brand];
+    [brand.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:18].active = YES;
+    [brand.topAnchor constraintEqualToAnchor:sidebar.topAnchor constant:62].active = YES;
+
+    // Keep the existing mode controller, including file/history behaviour.
     _tabs = [NSSegmentedControl segmentedControlWithLabels:@[@"Перевести текст", @"Улучшить текст", @"Перевести файлы", @"История"]
-           trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(tabChanged:)];
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(tabChanged:)];
     _tabs.selectedSegment = 0;
-    _tabs.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:_tabs];
+    NSArray *titles = @[@"Перевести текст", @"Улучшить текст", @"Перевести файлы", @"История"];
+    NSArray *symbols = @[@"character.bubble", @"wand.and.stars", @"doc.text", @"clock.arrow.circlepath"];
+    NSMutableArray *navigation = [NSMutableArray new];
+    for (NSInteger i = 0; i < 4; i++) {
+        NSButton *button = FLIconButton(titles[i], symbols[i], self, @selector(navigateMain:));
+        button.tag = i;
+        button.bezelStyle = NSBezelStyleRecessed;
+        button.alignment = NSTextAlignmentLeft;
+        button.buttonType = NSButtonTypePushOnPushOff;
+        button.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:16 weight:NSFontWeightMedium];
+        [button.heightAnchor constraintEqualToConstant:39].active = YES;
+        [button.widthAnchor constraintEqualToConstant:184].active = YES;
+        [navigation addObject:button];
+    }
+    _navigationButtons = navigation;
+    NSStackView *nav = FLStack(navigation, YES, 7);
+    [sidebar addSubview:nav];
+    [nav.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:14].active = YES;
+    [nav.topAnchor constraintEqualToAnchor:brand.bottomAnchor constant:34].active = YES;
 
+    _modelNameLabel = FLHeading(@"Локальная модель", 12);
+    _modelNameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _modelStateLabel = [NSTextField wrappingLabelWithString:@""];
+    _modelStateLabel.font = [NSFont systemFontOfSize:11];
+    _modelStateLabel.textColor = NSColor.secondaryLabelColor;
+    NSButton *models = FLIconButton(@"Модели…", @"cpu", self, @selector(showModels:));
+    models.bezelStyle = NSBezelStyleRecessed;
+    NSStackView *modelInfo = FLStack(@[_modelNameLabel, _modelStateLabel, models], YES, 9);
+    FLGlassSurface *modelCard = [FLGlassSurface new];
+    modelCard.translatesAutoresizingMaskIntoConstraints = NO;
+    FLPin(modelInfo, modelCard, 12);
+    [sidebar addSubview:modelCard];
+    NSButton *settings = FLIconButton(@"Настройки", @"gearshape", self, @selector(showSettings:));
+    settings.bezelStyle = NSBezelStyleRecessed;
+    settings.translatesAutoresizingMaskIntoConstraints = NO;
+    [sidebar addSubview:settings];
+    [NSLayoutConstraint activateConstraints:@[
+        [settings.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:18],
+        [settings.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor constant:-20],
+        [modelCard.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:14],
+        [modelCard.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-14],
+        [modelCard.bottomAnchor constraintEqualToAnchor:settings.topAnchor constant:-18],
+        [modelCard.topAnchor constraintGreaterThanOrEqualToAnchor:nav.bottomAnchor constant:24],
+        [modelInfo.widthAnchor constraintEqualToConstant:160],
+        [_modelNameLabel.widthAnchor constraintEqualToConstant:160],
+        [_modelStateLabel.widthAnchor constraintEqualToConstant:160]
+    ]];
+
+    _pageTitle = FLHeading(@"Перевод текста", 27);
+    NSTextField *subtitle = FLLabel(@"Свободно общайтесь. Текст обрабатывается на вашем Mac.", 13);
+    NSStackView *heading = FLStack(@[_pageTitle, subtitle], YES, 6);
+    [content addSubview:heading];
+    [heading.topAnchor constraintEqualToAnchor:content.topAnchor].active = YES;
+    [heading.leadingAnchor constraintEqualToAnchor:content.leadingAnchor].active = YES;
+
+    _mainSourceLanguage = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [_mainSourceLanguage addItemsWithTitles:FLSourceLanguageNames()];
+    [_mainSourceLanguage selectItemAtIndex:0];
+    _mainSourceLanguage.toolTip = @"Исходный язык: автоопределение или выбор вручную";
+    [_mainSourceLanguage setAccessibilityLabel:@"Исходный язык"];
+    _mainSourceLanguage.target = self;
+    _mainSourceLanguage.action = @selector(mainSourceLanguageChanged:);
     _mainLanguage = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [_mainLanguage addItemsWithTitles:FLLanguageNames()];
-    _mainLanguage.translatesAutoresizingMaskIntoConstraints = NO;
     NSInteger savedIndex = [NSUserDefaults.standardUserDefaults integerForKey:@"languageIndex"];
     [_mainLanguage selectItemAtIndex:MAX(0, MIN(savedIndex, (NSInteger)FLLanguageNames().count - 1))];
     _mainLanguage.target = self;
     _mainLanguage.action = @selector(languageChanged:);
-    [root addSubview:_mainLanguage];
-
-    NSTextField *languageLabel = FLLabel(@"Язык перевода:", 13);
-    languageLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:languageLabel];
-
-    NSTextField *sourceLanguageLabel = FLLabel(@"Из:", 13);
-    sourceLanguageLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:sourceLanguageLabel];
-    _mainSourceLanguage = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [_mainSourceLanguage addItemsWithTitles:FLSourceLanguageNames()];
-    [_mainSourceLanguage selectItemAtIndex:0];
-    _mainSourceLanguage.toolTip = @"Исходный язык: Авто или выбери вручную для коротких фраз";
-    _mainSourceLanguage.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:_mainSourceLanguage];
+    [_mainLanguage setAccessibilityLabel:@"Язык перевода"];
+    for (NSPopUpButton *picker in @[_mainSourceLanguage, _mainLanguage]) {
+        picker.controlSize = NSControlSizeLarge;
+        picker.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+        [picker.heightAnchor constraintGreaterThanOrEqualToConstant:36].active = YES;
+    }
+    _detectedLanguageLabel = FLLabel(@"Из: автоопределение", 11);
+    NSStackView *from = FLStack(@[_detectedLanguageLabel, _mainSourceLanguage], YES, 4);
+    NSStackView *to = FLStack(@[FLLabel(@"Язык перевода", 11), _mainLanguage], YES, 4);
+    NSImageView *arrow = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"arrow.right" accessibilityDescription:@"Перевод на"]];
+    arrow.contentTintColor = NSColor.secondaryLabelColor;
+    [arrow.widthAnchor constraintEqualToConstant:32].active = YES;
+    NSStackView *languages = FLStack(@[from, arrow, to], NO, 18);
+    [from.widthAnchor constraintEqualToAnchor:to.widthAnchor].active = YES;
+    FLGlassSurface *languageBar = [FLGlassSurface new];
+    languageBar.translatesAutoresizingMaskIntoConstraints = NO;
+    FLPin(languages, languageBar, 14);
+    [content addSubview:languageBar];
 
     NSScrollView *source = FLEditor(&_sourceEditor, YES);
-    NSScrollView *result = FLEditor(&_resultEditor, YES); // Users can correct translations in place.
-    _sourceEditor.string = @"";
-    _resultEditor.string = @"";
-    NSStackView *columns = [NSStackView stackViewWithViews:@[source, result]];
-    columns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    columns.distribution = NSStackViewDistributionFillEqually;
-    columns.spacing = 10;
-    columns.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:columns];
-
-    _workButton = FLButton(@"Перевести", self, @selector(translateMain:));
-    NSButton *copyButton = FLButton(@"Копировать результат", self, @selector(copyMain:));
-    NSButton *saveButton = FLButton(@"Сохранить TXT", self, @selector(saveText:));
-    NSButton *settingsButton = FLButton(@"Настройки", self, @selector(showSettings:));
-    NSButton *modelsButton = FLButton(@"Модели…", self, @selector(showModels:));
-    // Keep the Clear action above the source editor: the bottom toolbar must
-    // remain usable even when the main window is at its minimum width.
+    NSScrollView *result = FLEditor(&_resultEditor, YES); // Editable completed results.
+    _sourceEditor.delegate = self;
+    _resultEditor.delegate = self;
+    [_sourceEditor setAccessibilityLabel:@"Исходный текст"];
+    [_resultEditor setAccessibilityLabel:@"Результат перевода"];
     NSButton *clearButton = FLButton(@"Очистить", self, @selector(clearMain:));
-    clearButton.toolTip = @"Очистить исходный текст и перевод (история сохранится)";
-    clearButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:clearButton];
-    _statusLabel = FLLabel(@"Офлайн · ⌘4 · ⇧⌘2", 12);
-    NSStackView *bottom = [NSStackView stackViewWithViews:@[_workButton, copyButton, saveButton, modelsButton, settingsButton, _statusLabel]];
-    bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    bottom.spacing = 10;
-    bottom.alignment = NSLayoutAttributeCenterY;
-    bottom.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:bottom];
+    clearButton.image = [NSImage imageWithSystemSymbolName:@"xmark.circle" accessibilityDescription:nil];
+    clearButton.toolTip = @"Очистить оба поля; история сохранится";
+    NSButton *copyButton = FLIconButton(@"Копировать", @"doc.on.doc", self, @selector(copyMain:));
+    NSView *sourceCard = FLEditorCard(source, @"ИСХОДНЫЙ ТЕКСТ", @"Введите текст или вставьте ⌘V", clearButton, &_sourceCountLabel);
+    NSView *resultCard = FLEditorCard(result, @"ПЕРЕВОД", @"Готовый перевод можно редактировать", copyButton, &_resultCountLabel);
+    NSStackView *columns = FLStack(@[sourceCard, resultCard], NO, 16);
+    columns.alignment = NSLayoutAttributeTop;
+    columns.distribution = NSStackViewDistributionFillEqually;
+    [sourceCard.heightAnchor constraintEqualToAnchor:columns.heightAnchor].active = YES;
+    [resultCard.heightAnchor constraintEqualToAnchor:columns.heightAnchor].active = YES;
+    [content addSubview:columns];
 
+    _workButton = FLIconButton(@"Перевести", @"arrow.right", self, @selector(translateMain:));
+    _workButton.controlSize = NSControlSizeLarge;
+    _workButton.bezelColor = NSColor.controlAccentColor;
+    _workButton.keyEquivalent = @"\r";
+    _workButton.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    _workButton.toolTip = @"Перевести текст · ⌘Return (выделение в любом приложении: ⌘4)";
     [NSLayoutConstraint activateConstraints:@[
-        [_tabs.topAnchor constraintEqualToAnchor:root.topAnchor constant:18],
-        [_tabs.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
-        [languageLabel.topAnchor constraintEqualToAnchor:_tabs.bottomAnchor constant:20],
-        [languageLabel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
-        [_mainLanguage.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
-        [_mainLanguage.leadingAnchor constraintEqualToAnchor:languageLabel.trailingAnchor constant:12],
-        [sourceLanguageLabel.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
-        [sourceLanguageLabel.leadingAnchor constraintEqualToAnchor:_mainLanguage.trailingAnchor constant:14],
-        [_mainSourceLanguage.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
-        [_mainSourceLanguage.leadingAnchor constraintEqualToAnchor:sourceLanguageLabel.trailingAnchor constant:6],
-        [clearButton.centerYAnchor constraintEqualToAnchor:languageLabel.centerYAnchor],
-        [clearButton.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
-        [clearButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:_mainSourceLanguage.trailingAnchor constant:12],
-        [columns.topAnchor constraintEqualToAnchor:languageLabel.bottomAnchor constant:16],
-        [columns.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
-        [columns.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
-        [columns.bottomAnchor constraintEqualToAnchor:bottom.topAnchor constant:-16],
-        [bottom.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
-        [bottom.trailingAnchor constraintLessThanOrEqualToAnchor:root.trailingAnchor constant:-12],
-        [bottom.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-20],
+        [_workButton.widthAnchor constraintGreaterThanOrEqualToConstant:160],
+        [_workButton.heightAnchor constraintGreaterThanOrEqualToConstant:38]
     ]];
+    NSButton *save = FLIconButton(@"Сохранить TXT", @"square.and.arrow.down", self, @selector(saveText:));
+    NSStackView *actions = FLStack(@[save, [NSView new], _workButton], NO, 12);
+    [content addSubview:actions];
+    _statusLabel = FLLabel(@"Готово к переводу · ⌘4 — перевести выделение", 12);
+    _statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_statusLabel setAccessibilityLabel:@"Статус перевода"];
+    _translationSpinner = [NSProgressIndicator new];
+    _translationSpinner.style = NSProgressIndicatorStyleSpinning;
+    _translationSpinner.controlSize = NSControlSizeSmall;
+    _translationSpinner.displayedWhenStopped = NO;
+    [_translationSpinner.widthAnchor constraintEqualToConstant:14].active = YES;
+    [_translationSpinner.heightAnchor constraintEqualToConstant:14].active = YES;
+    NSStackView *status = FLStack(@[_translationSpinner, _statusLabel], NO, 8);
+    [content addSubview:status];
+    [NSLayoutConstraint activateConstraints:@[
+        [languageBar.topAnchor constraintEqualToAnchor:heading.bottomAnchor constant:22],
+        [languageBar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [languageBar.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [columns.topAnchor constraintEqualToAnchor:languageBar.bottomAnchor constant:18],
+        [columns.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [columns.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [columns.bottomAnchor constraintEqualToAnchor:actions.topAnchor constant:-16],
+        [actions.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [actions.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [actions.bottomAnchor constraintEqualToAnchor:status.topAnchor constant:-12],
+        [status.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [status.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [status.bottomAnchor constraintEqualToAnchor:content.bottomAnchor]
+    ]];
+    [self refreshGlassUI];
+}
+
+- (void)navigateMain:(NSButton *)sender {
+    // File/history actions retain their existing routing. Do not replace a
+    // provisional result with history while its streaming callback is live.
+    if (_mainTranslating) { [self refreshGlassUI]; return; }
+    if (sender.tag == 3 && !_historyShowing) {
+        _savedResultBeforeHistory = [_resultEditor.string copy];
+        _historyShowing = YES;
+    } else if (sender.tag != 3 && _historyShowing) {
+        _resultEditor.string = _savedResultBeforeHistory ?: @"";
+        _savedResultBeforeHistory = nil;
+        _historyShowing = NO;
+    }
+    _tabs.selectedSegment = sender.tag;
+    [self tabChanged:sender];
+    [self refreshGlassUI];
+}
+
+- (void)mainSourceLanguageChanged:(id)sender { (void)sender; [self refreshGlassUI]; }
+
+- (void)refreshGlassUI {
+    NSArray *titles = @[@"Перевод текста", @"Улучшение текста", @"Перевод файлов", @"История переводов"];
+    NSInteger selected = MAX(0, MIN(_tabs.selectedSegment, 3));
+    _pageTitle.stringValue = titles[(NSUInteger)selected];
+    _workButton.title = selected == 1 ? @"Улучшить текст" : @"Перевести";
+    _workButton.enabled = !_mainTranslating && selected != 3;
+    for (NSButton *button in _navigationButtons) {
+        button.state = button.tag == selected ? NSControlStateValueOn : NSControlStateValueOff;
+        button.contentTintColor = button.tag == selected ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+        button.enabled = !_mainTranslating;
+    }
+    _sourceCountLabel.stringValue = [NSString stringWithFormat:@"%lu знаков", (unsigned long)_sourceEditor.string.length];
+    _resultCountLabel.stringValue = [NSString stringWithFormat:@"%lu знаков", (unsigned long)_resultEditor.string.length];
+    if (_mainSourceLanguage.indexOfSelectedItem == 0 && _sourceEditor.string.length) {
+        // Bound UI-only detection cost on long imported documents. Engine keeps
+        // its original full-text language routing and validation.
+        NSString *sample = [_sourceEditor.string substringToIndex:MIN((NSUInteger)2000, _sourceEditor.string.length)];
+        NSString *code = FLSourceLanguage(sample);
+        NSString *name = code ? [[NSLocale localeWithLocaleIdentifier:@"ru"] localizedStringForLanguageCode:code] : nil;
+        _detectedLanguageLabel.stringValue = name ? [@"Определён: " stringByAppendingString:name] : @"Из: автоопределение";
+    } else _detectedLanguageLabel.stringValue = @"Исходный язык";
+    NSInteger index = FLActiveModelIndex();
+    NSDictionary *model = FLModels()[(NSUInteger)index];
+    NSString *name = [model[@"name"] componentsSeparatedByString:@" · "].firstObject;
+    _modelNameLabel.stringValue = name;
+    _modelNameLabel.toolTip = model[@"name"];
+    BOOL installed = FLModelInstalled(index);
+    NSString *state = installed ? (_mainTranslating ? @"Обрабатывает текст на Mac" : @"Установлена · готова к запросу") : @"Не установлена · откройте модели";
+    if (_modelTask) state = @"Загрузка модели…";
+    if (_verifyingModel) state = @"Проверка целостности…";
+    _modelStateLabel.stringValue = [NSString stringWithFormat:@"%@\nQ4_K_M · %@\nБез облачной обработки", state, model[@"size"]];
+    _modelStateLabel.textColor = installed ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor;
+    if (_mainTranslating) [_translationSpinner startAnimation:nil];
+    else [_translationSpinner stopAnimation:nil];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    if (notification.object == _mainWindow) [self refreshGlassUI];
 }
 
 - (void)createQuickPanel {
@@ -933,6 +1108,10 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
         _mainTranslating = YES;
         _resultEditor.editable = NO; // Prevent user edits from being overwritten by SSE updates.
     }
+    if (!quick) {
+        _statusLabel.stringValue = @"Запуск локального перевода…";
+        [self refreshGlassUI];
+    }
     sourceLanguage = sourceLanguage ?: @"unknown";
     fl_work_async_diagnostic(text.UTF8String, targetArgument.UTF8String, effectiveMode.UTF8String,
         model.UTF8String, origin.UTF8String, sourceLanguage.UTF8String, FLRustCallback, (__bridge_retained void *)job);
@@ -953,6 +1132,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
     } else {
         if (job.generation != _mainGeneration) return;
         _resultEditor.string = partial;
+        [self refreshGlassUI];
         _statusLabel.stringValue = @"Перевод идёт…";
     }
 }
@@ -990,6 +1170,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
         _workButton.enabled = YES;
         _statusLabel.stringValue = ok ? @"Перевод выполнен на Mac" : @"Ошибка движка. Открой «Модели» или проверь журнал.";
     }
+    [self refreshGlassUI];
     if (ok) {
         [_sessionHistory insertObject:@{ @"source": job.source, @"result": result } atIndex:0];
         if (_sessionHistory.count > 50) [_sessionHistory removeLastObject];
@@ -998,6 +1179,9 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
 
 - (void)clearMain:(id)sender {
     (void)sender;
+    _historyShowing = NO;
+    _savedResultBeforeHistory = nil;
+    _tabs.selectedSegment = 0;
     ++_mainGeneration; // Ignore results from translations already in flight.
     _mainTranslating = NO;
     _resultEditor.editable = YES;
@@ -1005,6 +1189,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
     _resultEditor.string = @"";
     _workButton.enabled = YES;
     _statusLabel.stringValue = @"Поля очищены";
+    [self refreshGlassUI];
     [_mainWindow makeFirstResponder:_sourceEditor];
     // Do not change translation history, the selected model or the language.
 }
@@ -1053,7 +1238,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
         [self request:_currentQuickSource mode:_currentQuickMode quick:YES language:FLSelectedLanguage(_quickLanguage)];
     }
 }
-- (void)showMain:(id)sender { (void)sender; [_mainWindow makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; }
+- (void)showMain:(id)sender { (void)sender; [self refreshGlassUI]; [_mainWindow makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; }
 // Do not move between an NSPanel and a dockless main NSWindow just to edit.
 // Editing in place also preserves the original selection used by Replace.
 - (void)finishQuickEditing {
@@ -1102,6 +1287,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
     }
 }
 - (void)textDidChange:(NSNotification *)notification {
+    if (notification.object == _sourceEditor || notification.object == _resultEditor) [self refreshGlassUI];
     if (notification.object == _quickEditor && _quickEditor.editable) {
         _currentQuickResult = [_quickEditor.string copy];
         _replaceButton.enabled = _lastTranslationOK && _currentQuickResult.length > 0 &&
@@ -1286,6 +1472,7 @@ static void FLBenchmarkCallback(char *raw, int success, void *context) {
     _sourceEditor.string = source;
     _tabs.selectedSegment = 0;
     _workButton.title = @"Перевести";
+    [self refreshGlassUI];
 }
 
 - (void)saveText:(id)sender {

@@ -107,7 +107,7 @@ xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=15.0 -fobjc-arc -fmodu
   "$ROOT/target/aarch64-apple-darwin/release/libfreelingo_core.a" \
   -framework Cocoa -framework Carbon -framework ApplicationServices \
   -framework CoreGraphics -framework Vision -framework QuartzCore \
-  -framework Security -framework SystemConfiguration -framework ServiceManagement \
+  -framework Security -framework SystemConfiguration -framework ServiceManagement -framework NaturalLanguage \
   -lresolv -liconv -o "$BIN/FreeLingo"
 
 chmod +x "$BIN/FreeLingo" "$BIN/llama-server"

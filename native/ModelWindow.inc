@@ -63,6 +63,7 @@
 }
 
 - (void)updateModelUI {
+    [self refreshGlassUI];
     NSInteger index = _modelPicker.indexOfSelectedItem;
     if (index < 0 || index >= (NSInteger)FLModels().count) return;
     BOOL installed = FLModelInstalled(index);
