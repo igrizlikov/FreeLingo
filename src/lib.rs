@@ -1,4 +1,4 @@
-//! FreeLingo 0.6.16 translation engine. A private bundled llama.cpp server runs
+//! FreeLingo 0.6.17 translation engine. A private bundled llama.cpp server runs
 //! exclusively on localhost; models are downloaded separately by the AppKit UI.
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -30,6 +30,22 @@ static TRACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 // 0 = llama.cpp default (auto), 1 = force on, 2 = force off.
 // Atomic avoids cross-thread environment changes while UI/inference is running.
 static FLASH_ATTENTION_MODE: AtomicU8 = AtomicU8::new(0);
+// 0 = existing llama.cpp prompt-prefix cache, 1 = disable reuse for each 12B request.
+// This is an accuracy/reproducibility experiment, NOT a guaranteed speedup.
+static KV_CACHE_MODE: AtomicU8 = AtomicU8::new(0);
+
+#[no_mangle]
+pub extern "C" fn fl_set_kv_cache_mode(mode: c_int) {
+    KV_CACHE_MODE.store(if mode == 1 { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+// The test runner overrides this setting per request, without touching the UI preference.
+fn apply_prompt_cache(payload: &mut Value, model: &Path, no_reuse: bool) {
+    if translate_gemma_12b_model(model) && no_reuse {
+        payload["cache_prompt"] = json!(false);
+    }
+}
+
 
 fn effective_flash_mode(model: &Path) -> u8 {
     if translate_gemma_12b_model(model) {
@@ -326,7 +342,7 @@ fn trace_language(code: &str) -> &'static str {
 
 fn trace_origin(origin: &str) -> &'static str {
     match origin { "main" => "main", "hotkey" => "hotkey", "hotkey_clipboard" => "hotkey_clipboard", "ab" => "ab",
-                   "ocr" => "ocr", "clipboard" => "clipboard", _ => "unknown" }
+                   "ocr" => "ocr", "clipboard" => "clipboard", "benchmark" => "benchmark", _ => "unknown" }
 }
 
 // The diagnostic log holds ONLY metadata: no text, translated results, full
@@ -503,7 +519,12 @@ fn request_chunk(session: &Backend, source: &str, target: &str, operation: &str,
     chunk_index: usize, prefix: &str, progress: Option<&dyn Fn(&str)>) -> Result<String, String> {
     let mut previous_error = "Модель вернула некачественный результат".to_owned();
     for attempt in 0..3 {
-        let payload = make_payload(source, target, operation, &session.model, attempt)?;
+        let mut payload = make_payload(source, target, operation, &session.model, attempt)?;
+        let no_reuse = KV_CACHE_MODE.load(Ordering::Relaxed) == 1;
+        apply_prompt_cache(&mut payload, &session.model, no_reuse);
+        trace.log(&session.model, "kv_profile", &format!(
+            "chunk={} attempt={} cache_prompt={}", chunk_index, attempt + 1,
+            if no_reuse && translate_gemma_12b_model(&session.model) { "false" } else { "default" }));
         // Log the exact sampling parameters used by this attempt, not just UI preferences.
         let sampling = format!("chunk={} attempt={} temperature={} top_p={} top_k={} repeat_penalty={} max_tokens={}",
             chunk_index, attempt + 1,
@@ -879,6 +900,125 @@ pub extern "C" fn fl_free_string(s: *mut c_char) {
     if !s.is_null() { unsafe { drop(CString::from_raw(s)); } }
 }
 
+// A fixed, non-personal multilingual benchmark. Uses the very same private
+// llama-server instance as normal translation, but never changes its UI options.
+// Run three iterations per cache profile so a single noisy result does not decide.
+// The serialized backend lock prevents collisions with interactive requests.
+const KV_BENCHMARK_TEXT: &str = "My Wonderful Family\nI live in a house near the mountains. I have two brothers and one sister, and I am the youngest. My father teaches mathematics and my mother works as a nurse in a large hospital. My brothers study hard and my sister is very kind.\n\nAt weekends we cook dinner with our grandmother. Then we play board games together. We laugh a lot and always have a good time.";
+
+#[derive(Default)]
+struct BenchProfile {
+    runs: usize,
+    wall_ms: u128,
+    predicted_n: f64,
+    predicted_ms: f64,
+    prompt_n: f64,
+    fingerprints: Vec<String>,
+}
+impl BenchProfile {
+    fn record(&mut self, wall: u128, timings: Option<&Value>, translated: &str) {
+        self.runs += 1;
+        self.wall_ms += wall;
+        if let Some(t) = timings {
+            self.predicted_n += t.get("predicted_n").and_then(Value::as_f64).unwrap_or(0.0);
+            self.predicted_ms += t.get("predicted_ms").and_then(Value::as_f64).unwrap_or(0.0);
+            self.prompt_n += t.get("prompt_n").and_then(Value::as_f64).unwrap_or(0.0);
+        }
+        self.fingerprints.push(private_fingerprint(translated));
+    }
+    fn tokens_per_second(&self) -> f64 {
+        if self.predicted_ms > 0.0 { self.predicted_n * 1000.0 / self.predicted_ms } else { 0.0 }
+    }
+    fn stable(&self) -> bool {
+        self.fingerprints.first().map(|first| self.fingerprints.iter().all(|x| x == first)).unwrap_or(false)
+    }
+    fn mean_ms(&self) -> u128 { self.wall_ms / self.runs.max(1) as u128 }
+    fn mean_prompt_n(&self) -> f64 { self.prompt_n / self.runs.max(1) as f64 }
+}
+
+fn benchmark_kv_cache(model: &Path) -> Result<String, String> {
+    if !translate_gemma_12b_model(model) || !model.is_file() {
+        return Err("Для теста установи TranslateGemma 12B Q4_K_M в разделе «Модели».".into());
+    }
+    let trace = TranslationTrace::new(KV_BENCHMARK_TEXT, "benchmark");
+    let mut guard = backend().lock().map_err(|_| "Движок занят".to_string())?;
+    let requested_flash = effective_flash_mode(model);
+    let restart = match guard.as_mut() {
+        None => true,
+        Some(previous) => previous.model != model || previous.flash_mode != requested_flash
+            || !matches!(previous.child.try_wait(), Ok(None)),
+    };
+    if restart {
+        if let Some(mut old) = guard.take() { let _ = old.child.kill(); let _ = old.child.wait(); }
+        let (server, actual_flash) = match start_server(model, requested_flash) {
+            Ok(s) => (s, requested_flash),
+            Err(_) if requested_flash != 0 => (start_server(model, 0)?, 0),
+            Err(e) => return Err(e),
+        };
+        *guard = Some(server);
+        trace.log(model, "bench_backend", &format!("started=1 flash_attn={}", flash_mode_name(actual_flash)));
+    }
+    let session = guard.as_ref().ok_or("Локальный движок недоступен")?;
+    let mut cached = BenchProfile::default();
+    let mut clean = BenchProfile::default();
+    // Use the same server and model for both profiles. Two more requests than
+    // the minimum allow checking whether a result-hash difference is repeatable.
+    for (cache_enabled, profile) in [(true, &mut cached), (false, &mut clean)] {
+        for iteration in 1..=3 {
+            let mut payload = make_payload(KV_BENCHMARK_TEXT, "en>ru", "translate_natural", model, 0)?;
+            apply_prompt_cache(&mut payload, model, !cache_enabled);
+            let start = Instant::now();
+            let answer = curl_request(&format!("http://127.0.0.1:{}/v1/chat/completions", session.port),
+                &session.token, Some(&payload.to_string()), "180")?;
+            if let Some(err) = answer.get("error") {
+                return Err(format!("Бенчмарк: ошибка локального сервера ({})", err.get("type").and_then(Value::as_str).unwrap_or("unknown")));
+            }
+            if answer.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+                return Err("Бенчмарк: модель обрезала ответ".into());
+            }
+            let translated = answer.pointer("/choices/0/message/content").and_then(Value::as_str)
+                .ok_or("Бенчмарк: нет перевода")?;
+            let translated = plain_answer(translated);
+            if let Some(issue) = quality_issue(KV_BENCHMARK_TEXT, &translated, "ru") {
+                return Err(format!("Бенчмарк: {issue}"));
+            }
+            profile.record(start.elapsed().as_millis(), answer.get("timings"), &translated);
+            trace.log(model, "kv_bench", &format!(
+                "cache_prompt={} run={} wall_ms={} prompt_n={} predicted_n={} predicted_ms={} result_hash={}",
+                cache_enabled, iteration, start.elapsed().as_millis(),
+                answer.pointer("/timings/prompt_n").map(Value::to_string).unwrap_or_else(|| "na".into()),
+                answer.pointer("/timings/predicted_n").map(Value::to_string).unwrap_or_else(|| "na".into()),
+                answer.pointer("/timings/predicted_ms").map(Value::to_string).unwrap_or_else(|| "na".into()),
+                private_fingerprint(&translated)));
+        }
+    }
+    let cache_meaningful = cached.mean_prompt_n() + 10.0 < clean.mean_prompt_n();
+    let same_across = cached.fingerprints.first() == clean.fingerprints.first();
+    Ok(format!(
+        "TranslateGemma 12B · 6 проверок одного текста\n\nКэш включён: {:.1} ток/с · {} мс/запрос · входных токенов {:.0} · совпадение: {}\nКэш отключён: {:.1} ток/с · {} мс/запрос · входных токенов {:.0} · совпадение: {}\n\nМежду режимами результат: {}.\nKV-кэш действительно сократил обработку входа: {}.\n\nСм. подробности в translation-diagnostics.log (event=kv_bench). Время включает генерацию, а проверка совпадения касается только данного текста.",
+        cached.tokens_per_second(), cached.mean_ms(), cached.mean_prompt_n(), if cached.stable() { "да" } else { "нет" },
+        clean.tokens_per_second(), clean.mean_ms(), clean.mean_prompt_n(), if clean.stable() { "да" } else { "нет" },
+        if same_across { "совпадает с первым запросом" } else { "отличается" },
+        if cache_meaningful { "да" } else { "не подтверждено" }
+    ))
+}
+
+/// Run a read-only benchmark asynchronously. Returns exactly one callback.
+/// Do not log user clipboard contents; the benchmark uses its own fixed sample.
+#[no_mangle]
+pub extern "C" fn fl_benchmark_kv_async(model: *const c_char, done: Option<Completion>, context: *mut c_void) {
+    let path = PathBuf::from(c_arg(model));
+    let context_id = context as usize;
+    thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| benchmark_kv_cache(&path)))
+            .unwrap_or_else(|_| Err("Бенчмарк завершился с внутренней ошибкой".into()));
+        let (message, ok) = match outcome { Ok(s) => (s, 1), Err(s) => (s, 0) };
+        let ptr = CString::new(message.replace('\0', " ")).expect("NUL removed").into_raw();
+        if let Some(callback) = done { callback(ptr, ok, context_id as *mut c_void); }
+        else { fl_free_string(ptr); }
+    });
+}
+
 /// Best-effort cleanup. Never block the UI if translation is still running.
 #[no_mangle]
 pub extern "C" fn fl_shutdown() {
@@ -890,6 +1030,31 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test] fn benchmark_cache_payloads_affect_only_translate_gemma_12b() {
+        let gemma12 = Path::new("/Models/translategemma-12b-it-Q4_K_M.gguf");
+        let gemma4 = Path::new("/Models/translategemma-4b_Q4_K_M.gguf");
+        let mut clean = make_payload("Hello", "en>ru", "translate", gemma12, 0).unwrap();
+        let normal = clean.clone();
+        apply_prompt_cache(&mut clean, gemma12, true);
+        assert_eq!(clean["cache_prompt"], false);
+        assert!(normal.get("cache_prompt").is_none());
+        assert_eq!(clean["messages"], normal["messages"]);
+        let mut four = make_payload("Hello", "en>ru", "translate", gemma4, 0).unwrap();
+        apply_prompt_cache(&mut four, gemma4, true);
+        assert!(four.get("cache_prompt").is_none());
+    }
+
+    #[test] fn benchmark_profile_detects_reproducibility() {
+        let mut p = BenchProfile::default();
+        p.record(2000, Some(&json!({"predicted_n": 100, "predicted_ms": 1000, "prompt_n": 5})), "Привет");
+        p.record(3000, Some(&json!({"predicted_n": 100, "predicted_ms": 1000, "prompt_n": 5})), "Привет");
+        assert!(p.stable());
+        assert_eq!(p.mean_ms(), 2500);
+        assert!((p.tokens_per_second()-100.0).abs() < f64::EPSILON);
+        p.record(4000, None, "Привет!");
+        assert!(!p.stable());
+    }
 
     #[test]
     fn sse_delta_parser_reads_utf8_fragments_and_skips_usage() {

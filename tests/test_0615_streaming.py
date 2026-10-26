@@ -8,8 +8,8 @@ r=Path(__file__).resolve().parents[1]
 core=(r/'src/lib.rs').read_text()
 ui=(r/'native/main.m').read_text()
 header=(r/'native/FreeLingoCore.h').read_text()
-assert plistlib.loads((r/'assets/Info.plist').read_bytes())['CFBundleShortVersionString']=='0.6.16'
-assert plistlib.loads((r/'assets/Info.plist').read_bytes())['CFBundleVersion']=='26'
+assert plistlib.loads((r/'assets/Info.plist').read_bytes())['CFBundleShortVersionString']=='0.6.17'
+assert plistlib.loads((r/'assets/Info.plist').read_bytes())['CFBundleVersion']=='27'
 assert 'fn curl_stream_request(' in core
 assert 'fn sse_delta(' in core
 assert 'data == "[DONE]" { continue; }' in core

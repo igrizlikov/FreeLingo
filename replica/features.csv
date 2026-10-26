@@ -37,3 +37,5 @@ F32,TranslateGemma 12B fewer inference requests and timings,Rust inference,must,
 F33,TranslateGemma 12B streaming display,Rust/AppKit,should,untested,0.6.15 source SSE parser and callback source only,Requires macOS CI compile and UI testing incl clear/replace/error cases
 
 F34,Flash Attention A/B profile for TranslateGemma 12B,Rust/AppKit,should,untested,0.6.16 source and static checks,Requires macOS CI build and same-input tokens-per-second benchmark in auto/on/off modes
+F35,12B KV-cache opt-out,Rust/AppKit,should,untested,"source API and UI 0.6.17; Mac smoke pending",12B only; default unchanged
+F36,12B reproducibility benchmark,Rust/AppKit,should,untested,"six-run source implementation 0.6.17",Mac run and output hashes needed

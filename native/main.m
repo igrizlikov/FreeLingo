@@ -184,6 +184,7 @@ static NSScrollView *FLEditor(NSTextView * __strong *out, BOOL editable) {
 - (void)hotkey:(UInt32)identifier;
 - (void)translationFinished:(NSString *)result success:(BOOL)ok job:(FLJob *)job;
 - (void)translationProgress:(NSString *)partial job:(FLJob *)job;
+- (void)benchmarkFinished:(NSString *)result success:(BOOL)ok;
 @end
 
 static OSStatus FLHotkeyHandler(EventHandlerCallRef _unused, EventRef event, void *userData) {
@@ -209,6 +210,16 @@ static void FLRustCallback(char *raw, int success, void *context) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (success == 2) [job.controller translationProgress:answer job:job];
         else [job.controller translationFinished:answer success:(success != 0) job:job];
+    });
+}
+
+// Benchmark result has no streaming updates and owns a retained delegate context.
+static void FLBenchmarkCallback(char *raw, int success, void *context) {
+    FLAppDelegate *controller = (__bridge_transfer FLAppDelegate *)context;
+    NSString *text = raw ? [NSString stringWithUTF8String:raw] : @"Ошибка бенчмарка";
+    if (raw) fl_free_string(raw);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [controller benchmarkFinished:text ?: @"Ошибка кодировки" success:success == 1];
     });
 }
 
@@ -259,6 +270,9 @@ static void FLRustCallback(char *raw, int success, void *context) {
     NSButton *_settingsNaturalCheckbox;
     NSButton *_settingsLiteraryCheckbox;
     NSPopUpButton *_settingsFlashPicker;
+    NSPopUpButton *_settingsKVPicker;
+    NSButton *_settingsBenchmarkButton;
+    BOOL _benchmarkRunning;
     NSPopUpButton *_settingsShortcut0;
     NSPopUpButton *_settingsShortcut1;
     NSPopUpButton *_settingsShortcut2;
@@ -290,9 +304,10 @@ static void FLRustCallback(char *raw, int success, void *context) {
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         @"modelID": @"translategemma-4b", @"languageIndex": @0,
         @"showDockIcon": @NO, @"naturalRussianTranslation": @YES, @"literaryRussianReview": @NO,
-        @"flashAttentionMode": @0
+        @"flashAttentionMode": @0, @"kvCacheMode": @0
     }];
     fl_set_flash_attention((int)[NSUserDefaults.standardUserDefaults integerForKey:@"flashAttentionMode"]);
+    fl_set_kv_cache_mode((int)[NSUserDefaults.standardUserDefaults integerForKey:@"kvCacheMode"]);
     [self createApplicationMenu];
     [self createMainWindow];
     [self createQuickPanel];
@@ -1338,6 +1353,38 @@ static void FLRustCallback(char *raw, int success, void *context) {
     // Do not terminate an in-flight translation on this UI event.
 }
 
+- (void)settingsKVChanged:(NSPopUpButton *)sender {
+    NSInteger mode = MAX(0, MIN(sender.indexOfSelectedItem, 1));
+    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:@"kvCacheMode"];
+    fl_set_kv_cache_mode((int)mode);
+}
+
+- (void)startKVBenchmark:(id)sender {
+    (void)sender;
+    if (_benchmarkRunning) return;
+    NSInteger selected = FLModelIndexForID(@"translategemma-12b");
+    if (selected < 0 || !FLModelInstalled(selected)) {
+        [self presentMessage:@"Сначала установи TranslateGemma 12B в разделе «Модели». Она не обязана быть выбранной основной."];
+        return;
+    }
+    _benchmarkRunning = YES;
+    _settingsBenchmarkButton.enabled = NO;
+    _settingsBenchmarkButton.title = @"Выполняется тест…";
+    NSString *path = FLModelURL(selected).path;
+    fl_benchmark_kv_async(path.UTF8String, FLBenchmarkCallback, (__bridge_retained void *)self);
+}
+
+- (void)benchmarkFinished:(NSString *)result success:(BOOL)ok {
+    _benchmarkRunning = NO;
+    _settingsBenchmarkButton.enabled = YES;
+    _settingsBenchmarkButton.title = @"Тест KV-кэша и скорости (6 переводов)…";
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = ok ? @"Тест производительности завершён" : @"Не удалось выполнить тест";
+    alert.informativeText = result;
+    [alert addButtonWithTitle:@"Закрыть"];
+    [alert runModal];
+}
+
 - (void)settingsShortcutChanged:(NSPopUpButton *)sender {
     if (sender.tag < 0 || sender.tag > 2) return;
     [NSUserDefaults.standardUserDefaults setInteger:sender.indexOfSelectedItem
@@ -1406,12 +1453,23 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _settingsFlashPicker.target = self;
     _settingsFlashPicker.action = @selector(settingsFlashChanged:);
     [root addSubview:_settingsFlashPicker];
+    NSTextField *kvTitle = FLLabel(@"KV-кэш TranslateGemma 12B", 13);
+    kvTitle.frame = NSMakeRect(24, 161, 293, 27);
+    [root addSubview:kvTitle];
+    _settingsKVPicker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(320, 157, 322, 30) pullsDown:NO];
+    [_settingsKVPicker addItemsWithTitles:@[@"Обычный (быстрее)", @"Без повторного кэша (тест)"]];
+    _settingsKVPicker.target = self;
+    _settingsKVPicker.action = @selector(settingsKVChanged:);
+    [root addSubview:_settingsKVPicker];
     [self settingsAction:@"Сравнить Hy-MT2 и TranslateGemma / 4B и 12B…" selector:@selector(compareTranslations:)
-                   frame:NSMakeRect(24, 158, 298, 34) onView:root];
+                   frame:NSMakeRect(24, 116, 298, 32) onView:root];
     [self settingsAction:@"Открыть журнал перевода…" selector:@selector(openTranslationDiagnostics:)
-                   frame:NSMakeRect(336, 158, 282, 34) onView:root];
-    NSTextField *info = FLLabel(@"Для русского рекомендуем TranslateGemma 4B. Выбор модели — в разделе «Основные». Вычитка Qwen экспериментальная.", 12);
-    info.frame = NSMakeRect(24, 103, 637, 32);
+                   frame:NSMakeRect(336, 116, 282, 32) onView:root];
+    _settingsBenchmarkButton = [self settingsAction:@"Тест KV-кэша и скорости (6 переводов)…"
+        selector:@selector(startKVBenchmark:) frame:NSMakeRect(24, 71, 385, 32) onView:root];
+    _settingsBenchmarkButton.enabled = !_benchmarkRunning;
+    NSTextField *info = FLLabel(@"Режим KV-кэша меняет точность повторных вычислений, но не веса 12B. Тест не меняет настройки.", 12);
+    info.frame = NSMakeRect(24, 27, 637, 32);
     [root addSubview:info];
     return root;
 }
@@ -1471,6 +1529,7 @@ static void FLRustCallback(char *raw, int success, void *context) {
     _settingsNaturalCheckbox.state = [defaults boolForKey:@"naturalRussianTranslation"] ? NSControlStateValueOn : NSControlStateValueOff;
     _settingsLiteraryCheckbox.state = [defaults boolForKey:@"literaryRussianReview"] ? NSControlStateValueOn : NSControlStateValueOff;
     [_settingsFlashPicker selectItemAtIndex:MAX(0, MIN([defaults integerForKey:@"flashAttentionMode"], 2))];
+    [_settingsKVPicker selectItemAtIndex:MAX(0, MIN([defaults integerForKey:@"kvCacheMode"], 1))];
     NSArray<NSPopUpButton *> *shortcuts = @[_settingsShortcut0, _settingsShortcut1, _settingsShortcut2];
     for (unsigned i = 0; i < 3; ++i) {
         NSInteger choice = [defaults integerForKey:FLShortcutSetting(i)];

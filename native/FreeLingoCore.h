@@ -17,6 +17,10 @@ void fl_work_async_diagnostic(const char *text, const char *target, const char *
 void fl_free_string(char *result);
 // 0 = automatic, 1 = Flash Attention forced on, 2 = forced off. 12B only.
 void fl_set_flash_attention(int mode);
+// 0 = existing automatic KV prompt cache; 1 = disable cache reuse for 12B.
+void fl_set_kv_cache_mode(int mode);
+// Runs six fixed-text 12B translations on a background thread; callback once.
+void fl_benchmark_kv_async(const char *model, fl_completion done, void *context);
 void fl_shutdown(void);
 #ifdef __cplusplus
 }
