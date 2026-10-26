@@ -152,6 +152,44 @@ fn quality_issue(source: &str, result: &str, target: &str) -> Option<&'static st
     None
 }
 
+// Read-only quality telemetry. Flags are reasons for HUMAN review, not proof of
+// an inaccurate translation; never automatically rewrite, retry or reject for
+// spelling-out of digits, differing paragraph formatting or proper-name forms.
+// This code never writes a source snippet, model output or a literal number to logs.
+fn numeric_tokens(text: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut digits = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else if !digits.is_empty() {
+            // Leading zero differences often arise from date conventions.
+            let cleaned = digits.trim_start_matches('0');
+            result.push(if cleaned.is_empty() { "0".to_owned() } else { cleaned.to_owned() });
+            digits.clear();
+        }
+    }
+    result.sort();
+    result
+}
+
+fn translation_review_flags(source: &str, translated: &str, target: &str) -> Vec<&'static str> {
+    if target != "ru" { return Vec::new(); }
+    let mut flags = Vec::new();
+    let input_numbers = numeric_tokens(source);
+    if !input_numbers.is_empty() && input_numbers != numeric_tokens(translated) {
+        flags.push("check_numbers"); // Years, counts, decimals may be written in words.
+    }
+    let source_paragraphs = source.split("\n\n").filter(|p| !p.trim().is_empty()).count();
+    let translated_paragraphs = translated.split("\n\n").filter(|p| !p.trim().is_empty()).count();
+    if source_paragraphs > 1 && source_paragraphs != translated_paragraphs {
+        flags.push("check_paragraphs");
+    }
+    // Do not make simplistic or language-specific claims about names, negation,
+    // professions or idioms: those require a bilingual human review.
+    flags
+}
+
 fn find_server() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Не удалось найти FreeLingo: {e}"))?;
     let sibling = exe.parent().unwrap_or(Path::new("/")).join("llama-server");
@@ -830,6 +868,15 @@ fn request_local(source: &str, target: &str, operation: &str, model: &str, sourc
         }
     }
     if output.trim().is_empty() { return Err("Модель вернула пустой результат".into()); }
+    let review_flags = translation_review_flags(normalized_source, &output, translation_target(target));
+    if !review_flags.is_empty() {
+        trace.log(&path, "quality_review", &format!(
+            "flags={} source_paragraphs={} result_paragraphs={} numeric_source_count={} numeric_result_count={}",
+            review_flags.join(","),
+            normalized_source.split("\n\n").filter(|s| !s.trim().is_empty()).count(),
+            output.split("\n\n").filter(|s| !s.trim().is_empty()).count(),
+            numeric_tokens(normalized_source).len(), numeric_tokens(&output).len()));
+    }
     trace.log(&path, "translation", &format!("status=success result_hash={} result_chars={}",
         private_fingerprint(&output), output.chars().count()));
     if let Some(editor_path) = editor_path {
@@ -1030,6 +1077,22 @@ pub extern "C" fn fl_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_review_reports_numeric_drift_but_does_not_reject() {
+        assert!(translation_review_flags("In 1918, 20 people arrived.", "В 1919 году прибыли 20 человек.", "ru")
+            .contains(&"check_numbers"));
+        assert!(translation_review_flags("In 1918, 20 people arrived.", "В 1918 году прибыли 20 человек.", "ru").is_empty());
+        assert!(translation_review_flags("In 1918, 20 people arrived.", "В 1919 году прибыли 20 человек.", "en").is_empty());
+    }
+    #[test]
+    fn quality_review_observes_paragraphs_without_changing_translation() {
+        let source = "The first paragraph.\n\nThe second paragraph.";
+        assert!(translation_review_flags(source, "Первый абзац.\n\nВторой абзац.", "ru").is_empty());
+        assert_eq!(translation_review_flags(source, "Первый абзац. Второй абзац.", "ru"),
+            vec!["check_paragraphs"]);
+        assert_eq!(numeric_tokens("In 08 or 8 of 1918"), vec!["1918", "8", "8"]);
+    }
 
     #[test] fn benchmark_cache_payloads_affect_only_translate_gemma_12b() {
         let gemma12 = Path::new("/Models/translategemma-12b-it-Q4_K_M.gguf");

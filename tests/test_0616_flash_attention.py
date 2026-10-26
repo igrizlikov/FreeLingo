@@ -7,7 +7,7 @@ rs=(r/'src/lib.rs').read_text()
 m=(r/'native/main.m').read_text()
 h=(r/'native/FreeLingoCore.h').read_text()
 p=plistlib.loads((r/'assets/Info.plist').read_bytes())
-assert p['CFBundleShortVersionString']=='0.6.17' and p['CFBundleVersion']=='27'
+assert p['CFBundleShortVersionString']=='0.6.18' and p['CFBundleVersion']=='28'
 assert 'fl_set_flash_attention(int mode)' in h
 assert 'pub extern "C" fn fl_set_flash_attention(mode: c_int)' in rs
 assert 'static FLASH_ATTENTION_MODE: AtomicU8' in rs

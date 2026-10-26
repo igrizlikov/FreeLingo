@@ -1,0 +1,227 @@
+[
+  {
+    "id": "en_family",
+    "source": "My mother is a nurse, and I am the youngest of three children. My two brothers work hard at school. We always have a wonderful time together.",
+    "checks": [
+      "медсестра",
+      "младший из трёх детей",
+      "двое братьев",
+      "естественный перевод have a wonderful time"
+    ],
+    "target_lang": "ru",
+    "source_lang": "en"
+  },
+  {
+    "id": "en_flu",
+    "source": "The Spanish flu pandemic began in 1918. Between 20 and 50 million people died. A third wave occurred in 1919, and a fourth, smaller wave occurred in 1920.",
+    "checks": [
+      "1918",
+      "20",
+      "50",
+      "1919",
+      "1920",
+      "третья и четвёртая волны",
+      "пандемия испанского гриппа"
+    ],
+    "target_lang": "ru",
+    "source_lang": "en"
+  },
+  {
+    "id": "en_environment",
+    "source": "Global warming has changed weather patterns. We have seen stronger storms and droughts in places where they formerly did not occur. People must reduce waste and recycle materials.",
+    "checks": [
+      "изменение климатических условий",
+      "засухи",
+      "ранее не встречались",
+      "переработка материалов"
+    ],
+    "target_lang": "ru",
+    "source_lang": "en"
+  },
+  {
+    "id": "en_legal",
+    "source": "The tenant may terminate the agreement with 30 days' written notice. This does not waive any outstanding obligations under Section 12.",
+    "checks": [
+      "30",
+      "12",
+      "арендатор может расторгнуть",
+      "письменное уведомление",
+      "отрицание does not waive"
+    ],
+    "target_lang": "ru",
+    "source_lang": "en"
+  },
+  {
+    "id": "en_technical",
+    "source": "The server returned HTTP 503 after 15 seconds. Do not restart the service until the database backup is complete.",
+    "checks": [
+      "503",
+      "15",
+      "не перезапускать",
+      "до завершения резервного копирования"
+    ],
+    "target_lang": "ru",
+    "source_lang": "en"
+  },
+  {
+    "id": "fr_holidays",
+    "source": "En France, il y a au total 11 fêtes pendant l'année. Le 14 juillet est la fête nationale française. Noël a lieu le 25 décembre.",
+    "checks": [
+      "11",
+      "14",
+      "25",
+      "Национальный праздник Франции",
+      "Рождество"
+    ],
+    "target_lang": "ru",
+    "source_lang": "fr"
+  },
+  {
+    "id": "fr_idioms",
+    "source": "Nous passons de bons moments ensemble. Ma grand-mère a le cœur sur la main, mais elle n'aime pas être dérangée le matin.",
+    "checks": [
+      "время вместе",
+      "отзывчивость бабушки",
+      "не любит, когда её беспокоят",
+      "без буквального перевода идиомы"
+    ],
+    "target_lang": "ru",
+    "source_lang": "fr"
+  },
+  {
+    "id": "fr_technical",
+    "source": "La mise à jour du logiciel corrige 3 erreurs critiques, mais elle ne modifie pas les fichiers personnels.",
+    "checks": [
+      "3",
+      "устраняет",
+      "не изменяет личные файлы"
+    ],
+    "target_lang": "ru",
+    "source_lang": "fr"
+  },
+  {
+    "id": "fr_legal",
+    "source": "Le vendeur doit rembourser l'acheteur dans un délai de 14 jours. Aucun frais supplémentaire ne peut être facturé.",
+    "checks": [
+      "14",
+      "продавец",
+      "покупатель",
+      "запрет дополнительных расходов"
+    ],
+    "target_lang": "ru",
+    "source_lang": "fr"
+  },
+  {
+    "id": "it_columbus",
+    "source": "Cristoforo Colombo nacque vicino a Genova nel 1451. Il 3 agosto 1492 salpò da Palos de la Frontera. Morì nel 1506.",
+    "checks": [
+      "Христофор Колумб (не Кристофоро)",
+      "1451",
+      "3",
+      "1492",
+      "1506",
+      "Палос-де-ла-Фронтера"
+    ],
+    "target_lang": "ru",
+    "source_lang": "it"
+  },
+  {
+    "id": "it_everyday",
+    "source": "Mia nonna viene dall'Italia. È anziana ma ancora molto forte. Cucina benissimo e tutta la famiglia la ama.",
+    "checks": [
+      "бабушка",
+      "Италия",
+      "пожилая, но сильная",
+      "готовит вкусно"
+    ],
+    "target_lang": "ru",
+    "source_lang": "it"
+  },
+  {
+    "id": "it_negation",
+    "source": "Il contratto non entra in vigore prima del 1 novembre 2026, salvo accordo scritto di entrambe le parti.",
+    "checks": [
+      "1",
+      "2026",
+      "договор НЕ вступает в силу раньше",
+      "письменное соглашение обеих сторон"
+    ],
+    "target_lang": "ru",
+    "source_lang": "it"
+  },
+  {
+    "id": "it_technical",
+    "source": "Il motore consuma 12 kWh al giorno e non deve superare i 75 gradi Celsius.",
+    "checks": [
+      "12",
+      "75",
+      "потребление электроэнергии",
+      "температурный предел"
+    ],
+    "target_lang": "ru",
+    "source_lang": "it"
+  },
+  {
+    "id": "zh_smartcities",
+    "source": "中国的无锡在全国智慧城市排名中位居第一。银川和杭州也进入了前十名。评估包括交通、医疗、公共安全和生产力四个方面。",
+    "checks": [
+      "Уси",
+      "Иньчуань",
+      "Ханчжоу",
+      "первое место",
+      "первые десять",
+      "транспорт, медицина, безопасность, производительность",
+      "без «уровня умности»"
+    ],
+    "target_lang": "ru",
+    "source_lang": "zh"
+  },
+  {
+    "id": "zh_relations",
+    "source": "我有两个哥哥和一个妹妹。我的母亲是一名护士。我们周末一起去山里散步。",
+    "checks": [
+      "два старших брата",
+      "младшая сестра",
+      "мама медсестра",
+      "прогулки в горах по выходным"
+    ],
+    "target_lang": "ru",
+    "source_lang": "zh"
+  },
+  {
+    "id": "zh_numbers",
+    "source": "这家公司在2025年销售了350台设备，但在2026年只销售了120台，没有实现增长。",
+    "checks": [
+      "2025",
+      "350",
+      "2026",
+      "120",
+      "продажи снизились, а не выросли",
+      "сохранить отрицание"
+    ],
+    "target_lang": "ru",
+    "source_lang": "zh"
+  },
+  {
+    "id": "zh_negation",
+    "source": "未经患者同意，不得公开医疗记录。这项规定适用于所有医院。",
+    "checks": [
+      "без согласия пациента нельзя раскрывать",
+      "медицинские записи",
+      "все больницы"
+    ],
+    "target_lang": "ru",
+    "source_lang": "zh"
+  },
+  {
+    "id": "zh_environment",
+    "source": "气候变化导致了更严重的干旱和洪水，但当地居民仍在努力保护环境。",
+    "checks": [
+      "изменение климата",
+      "засухи и наводнения",
+      "тем не менее жители защищают окружающую среду"
+    ],
+    "target_lang": "ru",
+    "source_lang": "zh"
+  }
+]

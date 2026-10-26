@@ -7,7 +7,7 @@ core = (root/'src/lib.rs').read_text()
 ui = (root/'native/main.m').read_text()
 ffi = (root/'native/FreeLingoCore.h').read_text()
 p = plistlib.loads((root/'assets/Info.plist').read_bytes())
-assert p['CFBundleShortVersionString']=='0.6.17' and p['CFBundleVersion']=='27'
+assert p['CFBundleShortVersionString']=='0.6.18' and p['CFBundleVersion']=='28'
 for x in ('fl_set_kv_cache_mode', 'fl_benchmark_kv_async'):
     assert x in ffi and x in core, x
 assert 'static KV_CACHE_MODE: AtomicU8 = AtomicU8::new(0)' in core
@@ -27,4 +27,4 @@ for x in ('settingsKVChanged:', 'startKVBenchmark:', 'benchmarkFinished:',
 assert 'fl_set_kv_cache_mode((int)[NSUserDefaults.standardUserDefaults integerForKey:@"kvCacheMode"])' in ui
 assert (root/'RELEASE_0.6.17_RU.md').is_file()
 assert 'F35,' in (root/'replica/features.csv').read_text()
-print('OK: v0.6.17 KV opt-out scoped to 12B, six-run benchmark, unchanged default, private telemetry')
+print('OK: v0.6.18 KV opt-out scoped to 12B, six-run benchmark, unchanged default, private telemetry')

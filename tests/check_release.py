@@ -70,8 +70,8 @@ print('OK: edit in popup, content checks, splitting and Qwen3 8B catalog')
 # v0.6.3: editor hardening and stricter translation instructions.
 import plistlib
 plist = plistlib.loads((root / 'assets' / 'Info.plist').read_bytes())
-assert plist['CFBundleShortVersionString'] == '0.6.17'
-assert int(plist['CFBundleVersion']) == 27
+assert plist['CFBundleShortVersionString'] == '0.6.18'
+assert int(plist['CFBundleVersion']) == 28
 assert '_quickEditTransitioning' in main
 assert '_quickPanel makeFirstResponder:_quickEditButton' in main
 assert 'quality_issue(source, &result, translation_target(target))' in core
@@ -202,6 +202,14 @@ subprocess.run(['python3', str(root / 'tests' / 'test_0615_streaming.py')], chec
 subprocess.run(['python3', str(root / 'tests' / 'test_0616_flash_attention.py')], check=True)
 print('OK: v0.6.16 opt-in Flash Attention A/B, streaming and inference-layout regression guards')
 
-# v0.6.17 KV-cache repeatability test.
+# v0.6.18 KV-cache repeatability test.
 subprocess.run(['python3', str(root / 'tests' / 'test_0617_kv_benchmark.py')], check=True)
-print('OK: v0.6.17 KV-cache opt-out and independent benchmark')
+print('OK: v0.6.18 KV-cache opt-out and independent benchmark')
+
+# v0.6.18: non-destructive translation-quality instrumentation and a private,
+# human-reviewed multilingual corpus. Runtime model output is NOT certified here.
+subprocess.run(['python3', str(root / 'tests' / 'test_0618_quality.py')], check=True)
+subprocess.run(['python3', str(root / 'tests' / 'quality_review_macos.py'), '--dry-run'], check=True)
+assert (root/'RELEASE_0.6.18_RU.md').is_file()
+assert 'F36,Multilingual RU fidelity audit' in (root/'replica/features.csv').read_text()
+print('OK: v0.6.18 18 EN/FR/IT/ZH->RU quality cases, privacy-safe review signals and local human checklist')
